@@ -1,0 +1,42 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# Swift Package Manager / Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+*.xcuserstate
+Package.resolved
+
+# Built app bundles (build with ./install.sh)
+*.app
+
+# Logs & local script output
+*.log
+scripts/*.log
+fill_progress.log
+fill_run.log
+
+# Python (offline catalog fill scripts)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*~
+.cursor/
+
+# Local working notes / gap lists
+unmapped_graphs.txt

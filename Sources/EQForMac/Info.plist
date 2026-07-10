@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.eqformac.app</string>
+	<key>CFBundleName</key>
+	<string>EQ for Mac</string>
+	<key>CFBundleDisplayName</key>
+	<string>EQ for Mac</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleExecutable</key>
+	<string>EQForMac</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.2</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>EQ for Mac processes system audio to apply equalization across all apps.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>EQ for Mac captures system audio so EQ can apply to browser, Spotify, Apple Music, and every other app.</string>
+	<key>NSScreenCaptureDescription</key>
+	<string>macOS requires Screen &amp; System Audio Recording permission for system-wide EQ (Core Audio Taps).</string>
+</dict>
+</plist>
