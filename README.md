@@ -18,13 +18,13 @@ Thank you to [Sharur](https://www.youtube.com/@Sharur) and [PEQdB](https://peqdb
 
 ### 15-band EQ + headphone search
 
-![15-band graphic EQ with headphone graph search](docs/images/eq-panel-headphone-search.png)
+<img src="docs/images/eq-panel-headphone-search.png" alt="15-band graphic EQ with headphone graph search" width="450" />
 
 *Drag faders, apply genre presets, or search ~6,800 offline headphone curves.*
 
 ### Offline catalog & import
 
-![Headphone catalog list with Import EQ file](docs/images/headphone-catalog.png)
+<img src="docs/images/headphone-catalog.png" alt="Headphone catalog list with Import EQ file" width="450" />
 
 *Browse the full offline catalog or import your own Equalizer APO / PEQdB / AutoEQ `.txt` file.*
 
