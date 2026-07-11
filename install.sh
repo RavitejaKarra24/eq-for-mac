@@ -27,6 +27,9 @@ mkdir -p "$APP_PATH/Contents/Resources"
 cp "$BIN" "$APP_PATH/Contents/MacOS/EQForMac"
 chmod +x "$APP_PATH/Contents/MacOS/EQForMac"
 
+# Finder, Spotlight, and Open dialogs use this icon to identify the app.
+cp "Sources/EQForMac/Resources/AppIcon.icns" "$APP_PATH/Contents/Resources/AppIcon.icns"
+
 # SPM resource bundle (headphone presets) must sit next to the executable.
 if [[ -d "$BIN_DIR/EQForMac_EQForMac.bundle" ]]; then
   cp -R "$BIN_DIR/EQForMac_EQForMac.bundle" "$APP_PATH/Contents/MacOS/"
@@ -75,6 +78,8 @@ cat > "$APP_PATH/Contents/Info.plist" <<'PLIST'
 	<string>APPL</string>
 	<key>CFBundleExecutable</key>
 	<string>EQForMac</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.2</string>
 	<key>LSUIElement</key>

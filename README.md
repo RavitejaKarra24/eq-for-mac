@@ -119,6 +119,7 @@ Everything needed to run ships in the repo:
 | `Sources/EQForMac/Resources/headphones_catalog.json` | Headphone search index (~6,808 entries) |
 | `Sources/EQForMac/Resources/graph_names.txt` | PEQdB-style graph and target name list |
 | `Sources/EQForMac/Resources/target_curves.json` | 17 categorized PEQdB Studio reference targets and search aliases |
+| `Sources/EQForMac/Resources/AppIcon.icns` | Multi-resolution macOS application icon |
 | Installed app | Typically **~20–25 MB** on disk after `./install.sh` |
 
 No network is required to search or apply a bundled preset.

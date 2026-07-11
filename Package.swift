@@ -8,7 +8,12 @@ let package = Package(
         .executableTarget(
             name: "EQForMac",
             path: "Sources/EQForMac",
-            exclude: ["Info.plist"],
+            exclude: [
+                "Info.plist",
+                "Assets.xcassets",
+                "Resources/AppIcon-1024.png",
+                "Resources/AppIcon.icns",
+            ],
             resources: [
                 .copy("Resources/headphones"),
                 .copy("Resources/autoeq"),
