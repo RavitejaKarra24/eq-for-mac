@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "source": "PEQdB Studio target menu",
+  "targets": [
+    { "name": "PEQdB Diamond β", "category": "Reference", "aliases": ["PEQdB Diamond", "Diamond Beta"] },
+    { "name": "Diffuse Field", "category": "Baseline" },
+    { "name": "PEQdB Ultra", "category": "Preference" },
+    { "name": "HiFiEndgame", "category": "Preference", "aliases": ["HiFi Endgame"] },
+    { "name": "HiFiEndgame MKII", "category": "Preference", "aliases": ["HiFi Endgame MKII", "HiFiEndgame 2026 MKII"] },
+    { "name": "∆ Harman MoA 2025", "category": "Preference", "aliases": ["Harman MoA 2025", "Harman 2025"] },
+    { "name": "Harman IE 2019", "category": "Preference (IE)" },
+    { "name": "Knowles", "category": "Preference (IE)", "aliases": ["Knowles Preferred Response"] },
+    { "name": "IEF Preference 2025", "category": "Preference (IE)", "aliases": ["IEF 2025"] },
+    { "name": "∆ JM-1 -10dB Tilt", "category": "Preference (IE)", "aliases": ["JM-1 -10 dB Tilt", "JM1"] },
+    { "name": "Moondrop VDSF", "category": "Preference (IE)", "aliases": ["VDSF"] },
+    { "name": "Harman OE 2018", "category": "Preference (OE)" },
+    { "name": "Harman OE 2018 Linear Bass", "category": "Preference (OE)", "aliases": ["OE Linear Bass 2018", "Harman Linear Bass 2018"] },
+    { "name": "Harman OE 2013", "category": "Preference (OE)" },
+    { "name": "KEMAR KB50xx -10dB Tilt", "category": "Preference (OE)", "aliases": ["KEMAR -10 dB Tilt"] },
+    { "name": "Endgame IE", "category": "Legacy" },
+    { "name": "PEQdB HiFi", "category": "Legacy", "aliases": ["PEQDB HIFI"] }
+  ]
+}

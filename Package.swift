@@ -14,6 +14,7 @@ let package = Package(
                 .copy("Resources/autoeq"),
                 .copy("Resources/headphones_catalog.json"),
                 .copy("Resources/graph_names.txt"),
+                .copy("Resources/target_curves.json"),
             ],
             linkerSettings: [
                 .linkedFramework("CoreAudio"),

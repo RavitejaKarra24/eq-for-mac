@@ -64,6 +64,7 @@ final class EQViewModel: ObservableObject {
     @Published var statusText: String = ""
     @Published var isLoadingHeadphone = false
     @Published var headphoneLoadError: String?
+    @Published var catalogNotice: String?
 
     let audioEngine: AudioEngine
     let presetStore: PresetStore
@@ -175,8 +176,16 @@ final class EQViewModel: ObservableObject {
 
     /// Load EQ from the full AutoEQ catalog (downloads + caches on first use).
     func applyCatalogEntry(_ entry: HeadphoneCatalogEntry) {
+        if entry.isTargetCurve {
+            headphoneLoadError = nil
+            catalogNotice = "\(entry.name) is a reference target, not a standalone EQ. Use it with a compatible headphone measurement in PEQdB Studio."
+            statusText = "Reference target · \(entry.name)"
+            return
+        }
+
         isLoadingHeadphone = true
         headphoneLoadError = nil
+        catalogNotice = nil
         statusText = "Loading \(entry.name)…"
 
         Task { @MainActor in

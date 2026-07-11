@@ -35,7 +35,7 @@ Thank you to [Sharur](https://www.youtube.com/@Sharur) and [PEQdB](https://peqdb
 | Feature | Description |
 |--------|-------------|
 | **10- or 15-band graphic EQ** | Drag faders; changes apply live to system audio |
-| **6,808 offline headphone presets** | Searchable catalog (PEQdB graph names + AutoEQ models) — no internet needed |
+| **6,825 searchable graphs and targets** | 6,808 headphone entries plus 17 PEQdB Studio reference targets — no internet needed |
 | **Import EQ files** | Equalizer APO / PEQdB / AutoEQ parametric `.txt` |
 | **Genre presets** | Flat, Bass Boost, Treble Boost, V-Shape, Vocal, Podcast, … |
 | **On / Off** | Bypass processing instantly without quitting |
@@ -116,8 +116,9 @@ Everything needed to run ships in the repo:
 | Asset | Notes |
 |--------|--------|
 | `Sources/EQForMac/Resources/autoeq/*.txt` | ~6,015 parametric EQ curves |
-| `Sources/EQForMac/Resources/headphones_catalog.json` | Search index (~6,808 entries) |
-| `Sources/EQForMac/Resources/graph_names.txt` | PEQdB-style graph name list |
+| `Sources/EQForMac/Resources/headphones_catalog.json` | Headphone search index (~6,808 entries) |
+| `Sources/EQForMac/Resources/graph_names.txt` | PEQdB-style graph and target name list |
+| `Sources/EQForMac/Resources/target_curves.json` | 17 categorized PEQdB Studio reference targets and search aliases |
 | Installed app | Typically **~20–25 MB** on disk after `./install.sh` |
 
 No network is required to search or apply a bundled preset.
@@ -128,6 +129,8 @@ No network is required to search or apply a bundled preset.
 2. **[Squiglink](https://squig.link)** network — public FR files converted offline to Harman-target PEQ (`scripts/fill_from_squig.py`)
 3. **[PEQdB Studio](https://peqdb.com/studio/)** — public graph index / archive (`scripts/fill_from_peqdb_archive.py`)
 4. **[graph.hangout.audio](https://graph.hangout.audio)** (Crinacle) — via PEQdB’s public archive where applicable
+
+Reference targets are searchable for discovery, but are deliberately not applied as standalone EQ presets: a target must be paired with a compatible headphone measurement and measurement rig.
 
 Equalizer APO / AutoEQ / PEQdB text format example:
 

@@ -13,6 +13,12 @@ struct HeadphoneCatalogEntry: Identifiable, Codable, Hashable, Sendable {
     let autoeqName: String?
     /// Bundled filename under Resources/autoeq/ (e.g. `a1b2c3d4e5f6.txt`).
     let file: String?
+    /// PEQdB Studio grouping for reference targets. Nil for headphone measurements.
+    let targetCategory: String?
+    /// Alternate public names used by the source (for example a year-qualified name).
+    let aliases: [String]?
+
+    var isTargetCurve: Bool { targetCategory != nil }
 
     init(
         name: String,
@@ -20,7 +26,9 @@ struct HeadphoneCatalogEntry: Identifiable, Codable, Hashable, Sendable {
         source: String? = nil,
         hasEQ: Bool = false,
         autoeqName: String? = nil,
-        file: String? = nil
+        file: String? = nil,
+        targetCategory: String? = nil,
+        aliases: [String]? = nil
     ) {
         self.name = name
         self.path = path
@@ -28,6 +36,18 @@ struct HeadphoneCatalogEntry: Identifiable, Codable, Hashable, Sendable {
         self.hasEQ = hasEQ
         self.autoeqName = autoeqName
         self.file = file
+        self.targetCategory = targetCategory
+        self.aliases = aliases
+    }
+}
+
+private struct TargetCurvesFile: Codable {
+    let targets: [TargetDTO]
+
+    struct TargetDTO: Codable {
+        let name: String
+        let category: String
+        let aliases: [String]?
     }
 }
 
@@ -91,13 +111,19 @@ final class PresetStore: ObservableObject {
         }
 
         let lower = q.lowercased()
+        let terms = lower.split(whereSeparator: \.isWhitespace).map(String.init)
         var prefix: [HeadphoneCatalogEntry] = []
         var contains: [HeadphoneCatalogEntry] = []
         for entry in catalog {
             let name = entry.name.lowercased()
-            if name.hasPrefix(lower) {
+            let haystack = ([entry.name, entry.source ?? "", entry.targetCategory ?? ""]
+                + (entry.aliases ?? [])).joined(separator: " ").lowercased()
+            guard terms.allSatisfy({ haystack.contains($0) }) else { continue }
+            if name.hasPrefix(lower) || (entry.aliases ?? []).contains(where: {
+                $0.lowercased().hasPrefix(lower)
+            }) {
                 prefix.append(entry)
-            } else if name.contains(lower) {
+            } else {
                 contains.append(entry)
             }
             if prefix.count + contains.count >= limit * 2 { break }
@@ -201,6 +227,7 @@ final class PresetStore: ObservableObject {
         if let data = loadResourceData(name: "headphones_catalog", ext: "json"),
            let file = try? JSONDecoder().decode(HeadphonesCatalogFile.self, from: data) {
             applyCatalogFile(file)
+            appendTargetCurves()
             return
         }
 
@@ -212,6 +239,7 @@ final class PresetStore: ObservableObject {
             catalog = names.map { HeadphoneCatalogEntry(name: $0, hasEQ: false) }
             catalogCount = catalog.count
             withEQCount = 0
+            appendTargetCurves()
             return
         }
 
@@ -278,6 +306,32 @@ final class PresetStore: ObservableObject {
         catalog = entries.sorted {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
+        catalogCount = catalog.count
+        withEQCount = catalog.filter(\.hasEQ).count
+    }
+
+    private func appendTargetCurves() {
+        guard let data = loadResourceData(name: "target_curves", ext: "json"),
+              let file = try? JSONDecoder().decode(TargetCurvesFile.self, from: data)
+        else { return }
+
+        for target in file.targets {
+            let entry = HeadphoneCatalogEntry(
+                name: target.name,
+                source: "PEQdB Studio",
+                hasEQ: false,
+                targetCategory: target.category,
+                aliases: target.aliases
+            )
+            if let index = catalog.firstIndex(where: {
+                $0.name.caseInsensitiveCompare(target.name) == .orderedSame
+            }) {
+                catalog[index] = entry
+            } else {
+                catalog.append(entry)
+            }
+        }
+        catalog.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         catalogCount = catalog.count
         withEQCount = catalog.filter(\.hasEQ).count
     }

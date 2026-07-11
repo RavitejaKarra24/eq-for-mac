@@ -253,6 +253,13 @@ struct EQPopoverView: View {
                     .lineLimit(3)
             }
 
+            if let notice = model.catalogNotice {
+                Text(notice)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if !model.presetStore.imported.isEmpty {
@@ -323,7 +330,7 @@ struct EQPopoverView: View {
             model.applyCatalogEntry(entry)
         } label: {
             HStack(spacing: 8) {
-                Image(systemName: selected ? "checkmark.circle.fill" : (entry.hasEQ ? "headphones" : "ear"))
+                Image(systemName: selected ? "checkmark.circle.fill" : (entry.isTargetCurve ? "waveform.path" : (entry.hasEQ ? "headphones" : "ear")))
                     .foregroundStyle(selected ? Color.accentColor : .secondary)
                     .frame(width: 16)
                 VStack(alignment: .leading, spacing: 1) {
@@ -331,15 +338,21 @@ struct EQPopoverView: View {
                         .font(.caption)
                         .foregroundStyle(.primary)
                         .lineLimit(1)
-                    Text(entry.hasEQ
-                         ? (entry.source.map { "Offline · \($0)" } ?? "Offline EQ")
-                         : "No published AutoEQ · import .txt to apply")
+                    Text(entry.isTargetCurve
+                         ? "Target curve · \(entry.targetCategory ?? "Reference") · PEQdB Studio"
+                         : (entry.hasEQ
+                            ? (entry.source.map { "Offline · \($0)" } ?? "Offline EQ")
+                            : "No published AutoEQ · import .txt to apply"))
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 4)
-                if entry.hasEQ {
+                if entry.isTargetCurve {
+                    Text("target")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                } else if entry.hasEQ {
                     Text("EQ")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.secondary)
