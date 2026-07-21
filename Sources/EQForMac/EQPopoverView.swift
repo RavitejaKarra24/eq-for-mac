@@ -5,57 +5,84 @@ import SwiftUI
 struct EQPopoverView: View {
     @ObservedObject var model: EQViewModel
     @ObservedObject private var permission = PermissionMonitor.shared
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Fixed header — always visible (not inside scroll)
             header
                 .padding(.horizontal, 14)
-                .padding(.top, 14)
+                .padding(.top, 12)
                 .padding(.bottom, 10)
 
             if permission.shouldShowBanner {
                 permissionBanner
                     .padding(.horizontal, 14)
-                    .padding(.bottom, 8)
+                    .padding(.bottom, 10)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
-
-            Divider()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    bandModePicker
-                    eqSliders
+                VStack(alignment: .leading, spacing: 14) {
+                    eqBoard
                     preampRow
-                    Divider()
                     builtInPresets
-                    Divider()
                     headphoneSection
-                    Divider()
                     footer
                 }
-                .padding(14)
+                .padding(.horizontal, 14)
+                .padding(.top, 12)
+                .padding(.bottom, 14)
             }
         }
-        .frame(width: 440, height: 640)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .frame(width: 460, height: 660)
+        .background {
+            ZStack {
+                Color(nsColor: .windowBackgroundColor)
+                // Subtle top sheen — studio glass
+                LinearGradient(
+                    colors: [
+                        Color.primary.opacity(colorScheme == .dark ? 0.06 : 0.03),
+                        Color.clear,
+                    ],
+                    startPoint: .top,
+                    endPoint: .init(x: 0.5, y: 0.35)
+                )
+            }
+        }
+        .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: permission.shouldShowBanner)
+        .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: model.eqEnabled)
         .onAppear {
             model.refreshPermission()
         }
     }
 
-    // MARK: - Sections
+    // MARK: - Header
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: 12) {
-                Image(systemName: "slider.vertical.3")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.secondary)
+            HStack(alignment: .center, spacing: 10) {
+                // Status glyph
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(model.eqEnabled
+                              ? Color.accentColor.opacity(0.18)
+                              : Color.primary.opacity(0.06))
+                        .frame(width: 32, height: 32)
+                    Image(systemName: "slider.vertical.3")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(model.eqEnabled ? Color.accentColor : .secondary)
+                        .symbolEffect(.pulse, options: .repeating, isActive: model.eqEnabled && model.audioEngine.isRunning && !reduceMotion)
+                }
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("EQ for Mac")
-                        .font(.headline)
+                    HStack(spacing: 6) {
+                        Text("EQ for Mac")
+                            .font(.system(.headline, design: .default).weight(.semibold))
+                        if model.eqEnabled && model.audioEngine.isRunning {
+                            LiveBadge()
+                        }
+                    }
                     Text(model.statusText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -66,53 +93,72 @@ struct EQPopoverView: View {
                 Spacer(minLength: 8)
             }
 
-            // Large, hard-to-miss EQ power switch
+            // Power control
             HStack(spacing: 12) {
-                Text("System EQ")
-                    .font(.subheadline.weight(.semibold))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("System EQ")
+                        .font(.subheadline.weight(.semibold))
+                    Text(model.eqEnabled ? "Shaping all system audio" : "Bypassed — dry signal")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
 
                 Spacer()
 
                 Text(model.eqEnabled ? "ON" : "OFF")
-                    .font(.system(.subheadline, design: .rounded).weight(.bold))
-                    .foregroundStyle(model.eqEnabled ? Color.green : Color.secondary)
-                    .frame(minWidth: 32, alignment: .trailing)
+                    .font(.system(.caption, design: .rounded).weight(.bold))
+                    .tracking(0.6)
+                    .foregroundStyle(model.eqEnabled ? Color.accentColor : Color.secondary)
+                    .frame(minWidth: 28, alignment: .trailing)
+                    .accessibilityHidden(true)
 
-                Toggle("", isOn: $model.eqEnabled)
+                Toggle("System EQ", isOn: $model.eqEnabled)
                     .toggleStyle(.switch)
                     .labelsHidden()
-                    .controlSize(.regular)
+                    .controlSize(.small)
+                    .tint(.accentColor)
                     .help("Apply EQ to all system audio (browser, Spotify, Apple Music, …)")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
+            .background {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(model.eqEnabled
-                          ? Color.accentColor.opacity(0.18)
-                          : Color(nsColor: .controlBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
+                          ? Color.accentColor.opacity(colorScheme == .dark ? 0.14 : 0.10)
+                          : Color.primary.opacity(colorScheme == .dark ? 0.05 : 0.04))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(
-                        model.eqEnabled ? Color.accentColor.opacity(0.5) : Color.secondary.opacity(0.25),
+                        model.eqEnabled
+                            ? Color.accentColor.opacity(0.45)
+                            : Color.primary.opacity(0.08),
                         lineWidth: 1
                     )
+            }
+            .shadow(
+                color: model.eqEnabled ? Color.accentColor.opacity(colorScheme == .dark ? 0.18 : 0.10) : .clear,
+                radius: 10,
+                y: 2
             )
         }
     }
 
-    private var permissionBanner: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label(
-                "If EQ won’t start, allow Screen & System Audio Recording for EQ for Mac. If you already allowed it, tap “I’ve granted access”.",
-                systemImage: "exclamationmark.triangle.fill"
-            )
-            .font(.caption)
-            .foregroundStyle(.orange)
-            .fixedSize(horizontal: false, vertical: true)
+    // MARK: - Permission
 
-            HStack {
+    private var permissionBanner: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label {
+                Text("Allow Screen & System Audio Recording so EQ can tap system audio. If you already allowed it, confirm below.")
+                    .fixedSize(horizontal: false, vertical: true)
+            } icon: {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+            }
+            .font(.caption)
+            .foregroundStyle(.primary)
+
+            HStack(spacing: 8) {
                 Button("Grant Permission") {
                     model.requestPermissionIfNeeded()
                 }
@@ -125,6 +171,8 @@ struct EQPopoverView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
 
+                Spacer(minLength: 0)
+
                 Button("I’ve granted access") {
                     model.dismissPermissionBanner()
                 }
@@ -132,280 +180,364 @@ struct EQPopoverView: View {
                 .controlSize(.small)
             }
         }
-        .padding(8)
-        .background(Color.orange.opacity(0.12))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .padding(10)
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.orange.opacity(colorScheme == .dark ? 0.14 : 0.10))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Color.orange.opacity(0.28), lineWidth: 1)
+        }
         .onAppear {
             model.refreshPermission()
         }
     }
 
-    private var bandModePicker: some View {
-        HStack {
-            Text("Bands")
-                .font(.subheadline)
+    // MARK: - EQ Board (hero)
+
+    private var eqBoard: some View {
+        VStack(spacing: 10) {
+            HStack(alignment: .center, spacing: 10) {
+                Text("Equalizer")
+                    .font(.subheadline.weight(.semibold))
+
+                Picker("Bands", selection: $model.bandMode) {
+                    Text("10").tag(EQBandMode.ten)
+                    Text("15").tag(EQBandMode.fifteen)
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 110)
+                .controlSize(.small)
+                .labelsHidden()
+                .accessibilityLabel("Band count")
+
+                Spacer()
+
+                Text(model.selectedPresetName)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.primary.opacity(0.06)))
+
+                Button("Reset") {
+                    model.resetFlat()
+                }
+                .buttonStyle(.borderless)
+                .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
-            Picker("", selection: $model.bandMode) {
-                Text("10-band").tag(EQBandMode.ten)
-                Text("15-band").tag(EQBandMode.fifteen)
+                .help("Reset all bands to 0 dB")
             }
-            .pickerStyle(.segmented)
-            .frame(maxWidth: 180)
 
-            Spacer()
+            // Faders + curve
+            ZStack(alignment: .top) {
+                // Curve sits behind fader thumbs, aligned to track area
+                EQCurveView(gains: model.gains)
+                    .padding(.top, 16) // clear gain labels
+                    .padding(.bottom, 18) // clear freq labels
+                    .padding(.horizontal, 6)
+                    .opacity(model.eqEnabled ? 1 : 0.45)
 
-            Button("Reset") {
-                model.resetFlat()
-            }
-            .buttonStyle(.borderless)
-            .font(.caption)
-        }
-    }
-
-    private var eqSliders: some View {
-        VStack(spacing: 4) {
-            HStack(alignment: .bottom, spacing: 2) {
-                ForEach(Array(model.gains.indices), id: \.self) { index in
-                    VStack(spacing: 4) {
-                        Text(gainLabel(model.gains[index]))
-                            .font(.system(size: 9, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .frame(height: 12)
-
-                        VerticalSlider(value: binding(for: index), range: -12...12, height: 120)
-                            .frame(maxWidth: .infinity)
-
-                        Text(model.frequencyLabels[index])
-                            .font(.system(size: 8, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.6)
+                HStack(alignment: .bottom, spacing: 0) {
+                    ForEach(Array(model.gains.indices), id: \.self) { index in
+                        BandColumn(
+                            gain: binding(for: index),
+                            frequencyLabel: model.frequencyLabels[index],
+                            isEnabled: model.eqEnabled
+                        )
                     }
-                    .frame(maxWidth: .infinity)
                 }
             }
-            .frame(height: 160)
-
-            Text("Drag sliders to shape system audio · \(model.selectedPresetName)")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 10)
+            .frame(height: 188)
+            .background {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.primary.opacity(colorScheme == .dark ? 0.045 : 0.03))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
+            }
+            // Region labels
+            HStack {
+                regionLabel("BASS")
+                Spacer()
+                regionLabel("MIDS")
+                Spacer()
+                regionLabel("TREBLE")
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, -2)
         }
     }
+
+    private func regionLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .semibold, design: .rounded))
+            .tracking(1.1)
+            .foregroundStyle(.tertiary)
+    }
+
+    // MARK: - Preamp
 
     private var preampRow: some View {
         HStack(spacing: 10) {
-            Text("Preamp")
-                .font(.subheadline)
+            Label("Preamp", systemImage: "dial.low")
+                .labelStyle(.titleAndIcon)
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-                .frame(width: 52, alignment: .leading)
+                .frame(width: 78, alignment: .leading)
 
             Slider(value: $model.preampDB, in: -12...6, step: 0.5)
+                .controlSize(.small)
+                .tint(model.preampDB < -0.1 ? .orange : .accentColor)
+                .help("Overall gain before EQ — lower to avoid clipping")
+
             Text(String(format: "%+.1f dB", model.preampDB))
-                .font(.system(.caption, design: .monospaced))
-                .frame(width: 60, alignment: .trailing)
+                .font(.system(.caption, design: .monospaced).weight(.medium))
+                .foregroundStyle(abs(model.preampDB) < 0.05 ? .secondary : .primary)
+                .frame(width: 62, alignment: .trailing)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.primary.opacity(0.05))
+                )
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.primary.opacity(colorScheme == .dark ? 0.035 : 0.025))
         }
     }
 
+    // MARK: - Presets
+
     private var builtInPresets: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Presets")
-                .font(.subheadline.weight(.semibold))
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("Presets", systemImage: "square.stack.3d.up")
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     ForEach(model.presetStore.builtIn) { preset in
-                        Button(preset.name) {
+                        let selected = model.selectedPresetName == preset.name
+                            && model.selectedHeadphoneName == nil
+                        Button {
                             model.applyBuiltInPreset(preset)
+                        } label: {
+                            Text(preset.name)
+                                .font(.caption.weight(selected ? .semibold : .medium))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background {
+                                    Capsule(style: .continuous)
+                                        .fill(selected
+                                              ? Color.accentColor.opacity(colorScheme == .dark ? 0.22 : 0.16)
+                                              : Color.primary.opacity(0.06))
+                                }
+                                .overlay {
+                                    Capsule(style: .continuous)
+                                        .strokeBorder(
+                                            selected ? Color.accentColor.opacity(0.55) : Color.primary.opacity(0.06),
+                                            lineWidth: 1
+                                        )
+                                }
+                                .foregroundStyle(selected ? Color.accentColor : .primary)
                         }
-                        .buttonStyle(.bordered)
-                        .tint(model.selectedPresetName == preset.name && model.selectedHeadphoneName == nil
-                              ? Color.accentColor : Color.secondary)
-                        .controlSize(.small)
+                        .buttonStyle(.plain)
+                        .help("Apply \(preset.name) preset")
                     }
                 }
+                .padding(.vertical, 1)
             }
         }
     }
 
+    // MARK: - Headphone catalog
+
     private var headphoneSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Search graphs")
-                    .font(.subheadline.weight(.semibold))
+            HStack(spacing: 8) {
+                sectionHeader("Headphone graphs", systemImage: "headphones")
                 Spacer()
                 if model.isLoadingHeadphone {
                     ProgressView()
-                        .controlSize(.small)
+                        .controlSize(.mini)
                 }
-                Text("\(model.presetStore.catalogCount.formatted()) graphs")
-                    .font(.caption2)
+                Text("\(model.presetStore.catalogCount.formatted())")
+                    .font(.caption2.weight(.medium).monospacedDigit())
                     .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.primary.opacity(0.05)))
             }
 
-            TextField("Search graphs…", text: $model.headphoneSearch)
-                .textFieldStyle(.roundedBorder)
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                TextField("Search models, brands…", text: $model.headphoneSearch)
+                    .textFieldStyle(.plain)
+                    .font(.callout)
+                if !model.headphoneSearch.isEmpty {
+                    Button {
+                        model.headphoneSearch = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear search")
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.primary.opacity(colorScheme == .dark ? 0.06 : 0.04))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+            }
 
             if let err = model.headphoneLoadError {
-                Text(err)
+                Label(err, systemImage: "exclamationmark.circle.fill")
                     .font(.caption2)
                     .foregroundStyle(.red)
                     .lineLimit(3)
             }
 
             if let notice = model.catalogNotice {
-                Text(notice)
+                Label(notice, systemImage: "info.circle")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
+                LazyVStack(alignment: .leading, spacing: 1) {
                     if !model.presetStore.imported.isEmpty {
                         sectionLabel("Imported")
                         ForEach(model.presetStore.imported) { preset in
-                            importedRow(preset)
+                            ImportedRow(
+                                preset: preset,
+                                isSelected: model.selectedHeadphoneName == preset.name,
+                                isLoading: model.isLoadingHeadphone
+                            ) {
+                                model.applyHeadphone(preset)
+                            }
                         }
                     }
 
                     sectionLabel(
-                        "PEQdB · \(model.presetStore.catalogCount.formatted()) graphs · \(model.presetStore.withEQCount.formatted()) offline EQ"
+                        "Catalog · \(model.presetStore.withEQCount.formatted()) offline EQ"
                     )
                     ForEach(model.catalogResults) { entry in
-                        catalogRow(entry)
+                        CatalogRow(
+                            entry: entry,
+                            isSelected: model.selectedHeadphoneName == entry.name,
+                            isLoading: model.isLoadingHeadphone
+                        ) {
+                            model.applyCatalogEntry(entry)
+                        }
                     }
 
                     if model.catalogResults.isEmpty {
-                        Text("No matches. Try another spelling or import a PEQdB .txt.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 8)
+                        VStack(spacing: 6) {
+                            Image(systemName: "waveform.slash")
+                                .font(.title3)
+                                .foregroundStyle(.tertiary)
+                            Text("No matches")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.secondary)
+                            Text("Try another spelling, or import a PEQdB / AutoEQ .txt")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 20)
                     }
 
-                    if model.headphoneSearch.isEmpty && model.presetStore.catalogCount > model.catalogResults.count {
+                    if model.headphoneSearch.isEmpty
+                        && model.presetStore.catalogCount > model.catalogResults.count {
                         Text("Showing first \(model.catalogResults.count). Type to search all \(model.presetStore.catalogCount.formatted()).")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                             .padding(8)
                     }
                 }
+                .padding(.vertical, 4)
             }
-            .frame(height: 220)
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-
-            HStack {
-                Button {
-                    model.importEQFile()
-                } label: {
-                    Label("Import EQ file…", systemImage: "square.and.arrow.down")
-                }
-                .controlSize(.small)
-
-                Spacer()
+            .frame(height: 200)
+            .background {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.primary.opacity(colorScheme == .dark ? 0.04 : 0.03))
             }
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+            Button {
+                model.importEQFile()
+            } label: {
+                Label("Import EQ file…", systemImage: "square.and.arrow.down")
+                    .font(.caption.weight(.medium))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Import Equalizer APO / PEQdB / AutoEQ parametric .txt")
         }
     }
 
+    // MARK: - Footer
+
     private var footer: some View {
-        HStack {
-            Text("Applies to all apps · menu bar only")
+        HStack(spacing: 8) {
+            Image(systemName: "info.circle")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            Text("Applies to every app · lives in the menu bar")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
             Spacer()
-            Button("Quit EQ for Mac") {
+            Button("Quit") {
                 NSApp.terminate(nil)
             }
-            .controlSize(.small)
+            .buttonStyle(.borderless)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.secondary)
+            .help("Quit EQ for Mac")
+            .keyboardShortcut("q", modifiers: .command)
         }
+        .padding(.top, 2)
     }
 
-    // MARK: - Helpers
+    // MARK: - Shared bits
 
-    private func catalogRow(_ entry: HeadphoneCatalogEntry) -> some View {
-        let selected = model.selectedHeadphoneName == entry.name
-        return Button {
-            model.applyCatalogEntry(entry)
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: selected ? "checkmark.circle.fill" : (entry.isTargetCurve ? "waveform.path" : (entry.hasEQ ? "headphones" : "ear")))
-                    .foregroundStyle(selected ? Color.accentColor : .secondary)
-                    .frame(width: 16)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(entry.name)
-                        .font(.caption)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    Text(entry.isTargetCurve
-                         ? "Target curve · \(entry.targetCategory ?? "Reference") · PEQdB Studio"
-                         : (entry.hasEQ
-                            ? (entry.source.map { "Offline · \($0)" } ?? "Offline EQ")
-                            : "No published AutoEQ · import .txt to apply"))
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 4)
-                if entry.isTargetCurve {
-                    Text("target")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                } else if entry.hasEQ {
-                    Text("EQ")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("import")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .background(selected ? Color.accentColor.opacity(0.12) : Color.clear)
-        .disabled(model.isLoadingHeadphone)
-    }
-
-    private func importedRow(_ preset: EQPreset) -> some View {
-        Button {
-            model.applyHeadphone(preset)
-        } label: {
-            HStack {
-                Image(systemName: model.selectedHeadphoneName == preset.name
-                      ? "checkmark.circle.fill" : "doc.badge.plus")
-                    .foregroundStyle(
-                        model.selectedHeadphoneName == preset.name ? Color.accentColor : .secondary
-                    )
-                    .frame(width: 16)
-                Text(preset.name)
-                    .font(.caption)
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                Spacer()
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .background(
-            model.selectedHeadphoneName == preset.name
-                ? Color.accentColor.opacity(0.12)
-                : Color.clear
-        )
+    private func sectionHeader(_ title: String, systemImage: String) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.primary)
+            .labelStyle(.titleAndIcon)
+            .imageScale(.small)
     }
 
     private func sectionLabel(_ text: String) -> some View {
         Text(text)
             .font(.system(size: 10, weight: .semibold))
             .foregroundStyle(.secondary)
-            .padding(.horizontal, 8)
-            .padding(.top, 6)
+            .padding(.horizontal, 10)
+            .padding(.top, 8)
+            .padding(.bottom, 3)
     }
 
     private func binding(for index: Int) -> Binding<Float> {
@@ -416,16 +548,222 @@ struct EQPopoverView: View {
             },
             set: { newValue in
                 guard index < model.gains.count else { return }
-                // Clear parametric override when user manually edits a band.
                 var copy = model.gains
                 copy[index] = newValue
                 model.gains = copy
             }
         )
     }
+}
+
+// MARK: - Band column
+
+private struct BandColumn: View {
+    @Binding var gain: Float
+    var frequencyLabel: String
+    var isEnabled: Bool
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Text(gainLabel(gain))
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(abs(gain) < 0.05 ? Color.secondary.opacity(0.55) : Color.primary.opacity(0.85))
+                .frame(height: 12)
+                .contentTransition(.numericText())
+
+            VerticalSlider(value: $gain, range: -12...12, height: 124, isActive: isEnabled)
+                .frame(maxWidth: .infinity)
+
+            Text(frequencyLabel)
+                .font(.system(size: 8, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(frequencyLabel) hertz")
+    }
 
     private func gainLabel(_ g: Float) -> String {
         if abs(g) < 0.05 { return "0" }
         return String(format: "%+.0f", g)
+    }
+}
+
+// MARK: - Live badge
+
+private struct LiveBadge: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var pulse = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(Color.green)
+                .frame(width: 5, height: 5)
+                .opacity(pulse ? 1 : 0.45)
+                .shadow(color: .green.opacity(0.7), radius: pulse ? 3 : 0)
+            Text("LIVE")
+                .font(.system(size: 9, weight: .bold, design: .rounded))
+                .tracking(0.6)
+                .foregroundStyle(.green)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(Color.green.opacity(0.12)))
+        .onAppear {
+            guard !reduceMotion else {
+                pulse = true
+                return
+            }
+            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                pulse = true
+            }
+        }
+        .accessibilityLabel("EQ is live")
+    }
+}
+
+// MARK: - Catalog rows
+
+private struct CatalogRow: View {
+    let entry: HeadphoneCatalogEntry
+    var isSelected: Bool
+    var isLoading: Bool
+    var action: () -> Void
+
+    @State private var isHovering = false
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var iconName: String {
+        if isSelected { return "checkmark.circle.fill" }
+        if entry.isTargetCurve { return "waveform.path" }
+        if entry.hasEQ { return "headphones" }
+        return "ear"
+    }
+
+    private var subtitle: String {
+        if entry.isTargetCurve {
+            return "Target · \(entry.targetCategory ?? "Reference") · PEQdB Studio"
+        }
+        if entry.hasEQ {
+            return entry.source.map { "Offline · \($0)" } ?? "Offline EQ"
+        }
+        return "No published AutoEQ · import .txt"
+    }
+
+    private var badge: (text: String, emphasis: Bool) {
+        if entry.isTargetCurve { return ("target", false) }
+        if entry.hasEQ { return ("EQ", true) }
+        return ("import", false)
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: iconName)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                    .frame(width: 16)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(entry.name)
+                        .font(.caption.weight(isSelected ? .semibold : .regular))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Text(subtitle)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 4)
+
+                Text(badge.text)
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .foregroundStyle(badge.emphasis ? Color.secondary : Color.secondary.opacity(0.7))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(
+                        Capsule().fill(Color.primary.opacity(isSelected ? 0.08 : 0.04))
+                    )
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+            .background {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(rowBackground)
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 4)
+        .disabled(isLoading)
+        .onHover { isHovering = $0 }
+        .help(entry.name)
+    }
+
+    private var rowBackground: Color {
+        if isSelected {
+            return Color.accentColor.opacity(colorScheme == .dark ? 0.16 : 0.12)
+        }
+        if isHovering {
+            return Color.primary.opacity(0.05)
+        }
+        return .clear
+    }
+}
+
+private struct ImportedRow: View {
+    let preset: EQPreset
+    var isSelected: Bool
+    var isLoading: Bool
+    var action: () -> Void
+
+    @State private var isHovering = false
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "doc.badge.plus")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                    .frame(width: 16)
+                Text(preset.name)
+                    .font(.caption.weight(isSelected ? .semibold : .regular))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Spacer()
+                Text("file")
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.primary.opacity(0.05)))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+            .background {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(rowBackground)
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 4)
+        .disabled(isLoading)
+        .onHover { isHovering = $0 }
+    }
+
+    private var rowBackground: Color {
+        if isSelected {
+            return Color.accentColor.opacity(colorScheme == .dark ? 0.16 : 0.12)
+        }
+        if isHovering {
+            return Color.primary.opacity(0.05)
+        }
+        return .clear
     }
 }
