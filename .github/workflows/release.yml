@@ -1,0 +1,100 @@
+name: Release macOS app
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read and validate version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tags must look like v1.2.3" >&2
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build ad-hoc-signed universal DMG
+        env:
+          ARCHS: "arm64 x86_64"
+          BUILD_NUMBER: ${{ github.run_number }}
+          CODESIGN_IDENTITY: "-"
+          OUTPUT_DIR: dist
+        run: |
+          scripts/package.sh
+          APP="dist/EQ for Mac.app"
+          EXECUTABLE="$APP/Contents/MacOS/EQForMac"
+
+          lipo -info "$EXECUTABLE"
+          lipo -verify_arch arm64 x86_64 "$EXECUTABLE"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -d --verbose=4 "$APP" 2>&1 | grep -q "Signature=adhoc"
+
+          DMG="dist/EQ-for-Mac-$VERSION.dmg"
+          MOUNT_POINT="$RUNNER_TEMP/eq-for-mac-dmg"
+          mkdir -p "$MOUNT_POINT"
+          hdiutil attach "$DMG" -readonly -nobrowse -mountpoint "$MOUNT_POINT"
+          test -x "$MOUNT_POINT/EQ for Mac.app/Contents/MacOS/EQForMac"
+          codesign --verify --deep --strict "$MOUNT_POINT/EQ for Mac.app"
+          hdiutil detach "$MOUNT_POINT"
+
+          cp "$DMG" dist/EQ-for-Mac.dmg
+          (
+            cd dist
+            shasum -a 256 EQ-for-Mac.dmg > EQ-for-Mac.dmg.sha256
+          )
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA256="$(awk '{print $1}' dist/EQ-for-Mac.dmg.sha256)"
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          ## Install
+
+          Download **EQ-for-Mac.dmg**, open it, and drag **EQ for Mac** to Applications.
+
+          This free build is ad-hoc signed and is intentionally **not notarized by Apple**. macOS will block the first launch until you approve this app in **System Settings → Privacy & Security → Open Anyway**.
+
+          Read the illustrated guide: https://eq-for-mac.warriors-8531.chatgpt.site/install
+
+          SHA-256: \`$SHA256\`
+          EOF
+
+          gh release create "$GITHUB_REF_NAME" \
+            dist/EQ-for-Mac.dmg \
+            dist/EQ-for-Mac.dmg.sha256 \
+            --verify-tag \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --title "EQ for Mac $VERSION"
+
+      - name: Pin Homebrew Cask to this release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA256="$(awk '{print $1}' dist/EQ-for-Mac.dmg.sha256)"
+          git fetch origin main
+          git checkout -B update-cask origin/main
+          scripts/update-cask.sh "$VERSION" "$SHA256"
+
+          if git diff --quiet -- Casks/eq-for-mac.rb; then
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/eq-for-mac.rb
+          git commit -m "chore: update Homebrew cask to $VERSION"
+          git push origin HEAD:main

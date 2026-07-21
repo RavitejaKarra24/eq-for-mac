@@ -46,20 +46,53 @@ Thank you to [Sharur](https://www.youtube.com/@Sharur) and [PEQdB](https://peqdb
 ## Requirements
 
 - macOS **14.2** or newer (Core Audio Process Taps)
-- **Xcode Command Line Tools** (to build from source):  
-  `xcode-select --install`
 - **Screen & System Audio Recording** permission (macOS groups system-audio taps under this privacy setting)
 
 ---
 
-## Install (build from source)
+## Install
 
-This repo ships **source + offline EQ data**. There is no prebuilt binary in the repository (keeps the project small and easy to fork). Building produces a normal macOS app in `~/Applications`.
+### Download the app
+
+1. Download **[EQ for Mac.dmg](https://github.com/RavitejaKarra24/eq-for-mac/releases/latest/download/EQ-for-Mac.dmg)** from the latest release.
+2. Open the DMG and drag **EQ for Mac** into **Applications**.
+3. Try to open EQ for Mac. macOS will block this free, non-notarized build the first time.
+4. Open **System Settings → Privacy & Security**, scroll to Security, click **Open Anyway**, authenticate, and confirm.
+5. Allow **Screen & System Audio Recording** when prompted. The app appears in the menu bar rather than the Dock.
+
+The downloadable app is universal (Apple Silicon and Intel) and ad-hoc signed.
+It is intentionally not Apple-notarized because this project does not pay the
+annual Apple Developer Program fee. Read the
+**[illustrated installation guide](https://eq-for-mac.warriors-8531.chatgpt.site/install)**
+before approving the first launch.
+
+Only bypass an expected “developer cannot be verified” or “Apple cannot check
+it” warning for a DMG downloaded from this repository. Do **not** bypass an alert
+that says the app will damage your Mac or contains malware.
+
+### Homebrew
+
+This repository can also be used as a Homebrew tap:
 
 ```bash
-git clone <your-repo-url> eq_for_mac
+brew tap ravitejakarra24/eq-for-mac https://github.com/RavitejaKarra24/eq-for-mac
+brew install --cask eq-for-mac
+```
+
+Upgrade later with `brew upgrade --cask eq-for-mac`.
+
+The Cask installs the same checksummed DMG and preserves Gatekeeper protection,
+so complete the same **Open Anyway** step before the first launch.
+
+### Build from source
+
+The complete source and offline EQ data remain in this repository. Building from
+source requires the Xcode Command Line Tools (`xcode-select --install`) and
+installs a normal ad-hoc-signed app in `~/Applications`.
+
+```bash
+git clone https://github.com/RavitejaKarra24/eq-for-mac.git
 cd eq_for_mac
-chmod +x install.sh
 ./install.sh
 open ~/Applications/EQ\ for\ Mac.app
 ```
@@ -82,17 +115,16 @@ If audio stays silent or EQ never starts:
 2. Enable **EQ for Mac**
 3. Toggle EQ off and on again in the panel
 
-If Gatekeeper blocks an unsigned build:
+If **Open Anyway** still does not appear, first verify the release checksum. As
+an advanced fallback, remove quarantine only from the exact app bundle:
 
 ```bash
-xattr -dr com.apple.quarantine ~/Applications/EQ\ for\ Mac.app
+xattr -dr com.apple.quarantine "/Applications/EQ for Mac.app"
+open "/Applications/EQ for Mac.app"
 ```
 
-### Future prebuilt releases (optional)
-
-Once this project is on GitHub, you can attach a zipped `EQ for Mac.app` to a **GitHub Release** so non-developers can download without building. Until then, `./install.sh` is the supported path.
-
----
+Never disable Gatekeeper globally. Work- or school-managed Macs may prohibit
+per-app exceptions.
 
 ## How to use
 
@@ -173,10 +205,14 @@ The tap mutes the direct path to the speakers so you only hear the processed str
 
 ```text
 eq_for_mac/
+├── .github/workflows/           # CI + ad-hoc-signed tagged releases
+├── Casks/eq-for-mac.rb          # Homebrew Cask
 ├── Package.swift                 # SwiftPM package
 ├── install.sh                    # Release build → ~/Applications/EQ for Mac.app
 ├── README.md
+├── docs/DISTRIBUTION.md          # Maintainer release setup and checklist
 ├── docs/images/                  # Screenshots for this README
+├── scripts/package.sh            # Universal app + DMG packaging
 ├── scripts/                      # Offline catalog fill / backfill tools
 └── Sources/EQForMac/
     ├── AppDelegate.swift         # Menu-bar app entry
@@ -225,7 +261,16 @@ Regenerating the offline catalog (optional, for maintainers) needs Python + the 
 - Requires macOS **14.2+** (no fallback virtual driver in this project).
 - Some DRM / protected paths may behave differently depending on OS version and app.
 - Bluetooth devices can glitch briefly when switching outputs; the engine reconnects automatically.
-- Builds are **ad-hoc signed** (not notarized). Gatekeeper may warn; use `xattr` as above if needed.
+- Source and public release builds are ad-hoc signed and are not Apple-notarized.
+- macOS may request Gatekeeper or System Audio Recording approval again after an update.
+
+---
+
+## Releasing
+
+Maintainers can publish a release by pushing a semantic version tag such as
+`v1.0.0`. No Apple certificate or notarization credentials are required. See
+[the distribution guide](docs/DISTRIBUTION.md) for the full zero-fee release flow.
 
 ---
 

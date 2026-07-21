@@ -17,6 +17,9 @@ Package.resolved
 
 # Built app bundles (build with ./install.sh)
 *.app
+dist/
+*.dmg
+*.dmg.sha256
 
 # Logs & local script output
 *.log

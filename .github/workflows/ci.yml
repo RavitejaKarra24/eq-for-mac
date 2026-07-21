@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and validate app bundle
+        env:
+          ARCHS: "arm64 x86_64"
+          CREATE_DMG: "0"
+          OUTPUT_DIR: "${{ runner.temp }}/eq-for-mac"
+        run: |
+          scripts/package.sh
+          lipo -verify_arch arm64 x86_64 \
+            "${{ runner.temp }}/eq-for-mac/EQ for Mac.app/Contents/MacOS/EQForMac"
+          codesign --verify --deep --strict --verbose=2 \
+            "${{ runner.temp }}/eq-for-mac/EQ for Mac.app"
+          codesign -d --verbose=4 \
+            "${{ runner.temp }}/eq-for-mac/EQ for Mac.app" 2>&1 | grep -q "Signature=adhoc"
