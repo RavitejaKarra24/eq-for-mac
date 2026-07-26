@@ -4,6 +4,7 @@ set -euo pipefail
 APP_NAME="EQ for Mac"
 EXECUTABLE_NAME="EQForMac"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/Applications}"
+OPEN_APP="${OPEN_APP:-1}"
 APP_PATH="$INSTALL_DIR/$APP_NAME.app"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/eq-for-mac-install.XXXXXX")"
@@ -30,11 +31,13 @@ ditto "$BUILD_DIR/$APP_NAME.app" "$APP_PATH"
 xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
 codesign --verify --deep --strict "$APP_PATH"
 
-echo "→ Opening EQ for Mac"
-open "$APP_PATH"
+if [[ "$OPEN_APP" == "1" ]]; then
+  echo "→ Opening EQ for Mac"
+  open "$APP_PATH"
+fi
 
 echo ""
-echo "Installed and opened: $APP_PATH"
+echo "Installed: $APP_PATH"
 echo ""
 echo "On first use, allow EQ for Mac under:"
 echo "  System Settings → Privacy & Security → Screen & System Audio Recording"

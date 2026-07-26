@@ -24,6 +24,11 @@ if [[ ! "$BUILD_NUMBER" =~ ^[0-9]+$ ]]; then
 fi
 
 build_args=(-c "$CONFIGURATION")
+if swift build --help 2>/dev/null | grep -q "swiftbuild"; then
+  # Newer standalone Command Line Tools can lack native xcbuild support. The
+  # Swift Build engine works without a full Xcode installation.
+  build_args=(--build-system swiftbuild "${build_args[@]}")
+fi
 if [[ -n "$ARCHS" ]]; then
   for arch in $ARCHS; do
     build_args+=(--arch "$arch")
@@ -63,19 +68,24 @@ if [[ ! -d "$SOURCE_RESOURCE_BUNDLE" ]]; then
   exit 1
 fi
 
-# SwiftPM emits a flat resource bundle, but codesign requires nested bundles in a
-# macOS app to use the standard Contents/Resources layout.
 RESOURCE_BUNDLE="$APP_PATH/Contents/Resources/EQForMac_EQForMac.bundle"
-RESOURCE_CONTENTS="$RESOURCE_BUNDLE/Contents/Resources"
-mkdir -p "$RESOURCE_CONTENTS"
-ditto "$SOURCE_RESOURCE_BUNDLE" "$RESOURCE_CONTENTS"
+if [[ -d "$SOURCE_RESOURCE_BUNDLE/Contents/Resources" ]]; then
+  # Swift Build already emits a standard macOS resource bundle.
+  ditto "$SOURCE_RESOURCE_BUNDLE" "$RESOURCE_BUNDLE"
+else
+  # The native SwiftPM builder emits a flat bundle. Convert it to the standard
+  # layout required for a nested bundle inside a signed macOS app.
+  RESOURCE_CONTENTS="$RESOURCE_BUNDLE/Contents/Resources"
+  mkdir -p "$RESOURCE_CONTENTS"
+  ditto "$SOURCE_RESOURCE_BUNDLE" "$RESOURCE_CONTENTS"
 
-RESOURCE_PLIST="$RESOURCE_BUNDLE/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string com.eqformac.app.resources" "$RESOURCE_PLIST"
-/usr/libexec/PlistBuddy -c "Add :CFBundleName string EQForMac_EQForMac" "$RESOURCE_PLIST"
-/usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string BNDL" "$RESOURCE_PLIST"
-/usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_NUMBER" "$RESOURCE_PLIST"
-/usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION" "$RESOURCE_PLIST"
+  RESOURCE_PLIST="$RESOURCE_BUNDLE/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string com.eqformac.app.resources" "$RESOURCE_PLIST"
+  /usr/libexec/PlistBuddy -c "Add :CFBundleName string EQForMac_EQForMac" "$RESOURCE_PLIST"
+  /usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string BNDL" "$RESOURCE_PLIST"
+  /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_NUMBER" "$RESOURCE_PLIST"
+  /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION" "$RESOURCE_PLIST"
+fi
 
 echo "Ad-hoc signing app…"
 codesign --force --sign - --timestamp=none "$RESOURCE_BUNDLE"
