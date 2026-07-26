@@ -12,15 +12,14 @@ jobs:
   build:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Build and validate app bundle
         env:
           ARCHS: "arm64 x86_64"
-          CREATE_DMG: "0"
           OUTPUT_DIR: "${{ runner.temp }}/eq-for-mac"
         run: |
-          scripts/package.sh
+          scripts/build-app.sh
           lipo "${{ runner.temp }}/eq-for-mac/EQ for Mac.app/Contents/MacOS/EQForMac" \
             -verify_arch arm64 x86_64
           codesign --verify --deep --strict --verbose=2 \

@@ -2,32 +2,42 @@
 set -euo pipefail
 
 APP_NAME="EQ for Mac"
+EXECUTABLE_NAME="EQForMac"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/Applications}"
 APP_PATH="$INSTALL_DIR/$APP_NAME.app"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-PACKAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/eq-for-mac-install.XXXXXX")"
-trap 'rm -rf "$PACKAGE_DIR"' EXIT
+BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/eq-for-mac-install.XXXXXX")"
+trap 'rm -rf "$BUILD_DIR"' EXIT
 
-OUTPUT_DIR="$PACKAGE_DIR" CREATE_DMG=0 "$ROOT/scripts/package.sh"
+if ! xcrun --find swift >/dev/null 2>&1; then
+  echo "The Xcode Command Line Tools are required." >&2
+  echo "Install them with: xcode-select --install" >&2
+  exit 1
+fi
 
-echo "→ Creating app bundle at $APP_PATH"
+echo "→ Building EQ for Mac from the checked-out source"
+OUTPUT_DIR="$BUILD_DIR" "$ROOT/scripts/build-app.sh"
+
+echo "→ Installing at $APP_PATH"
+pkill -x "$EXECUTABLE_NAME" 2>/dev/null || true
 rm -rf "$APP_PATH"
 mkdir -p "$INSTALL_DIR"
-ditto "$PACKAGE_DIR/$APP_NAME.app" "$APP_PATH"
+ditto "$BUILD_DIR/$APP_NAME.app" "$APP_PATH"
+
+# A command-line source checkout normally has no quarantine flag. Removing it
+# here also keeps app-specific Gatekeeper metadata from a ZIP checkout out of
+# the locally built app. This does not change the Mac's global security policy.
+xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
+codesign --verify --deep --strict "$APP_PATH"
+
+echo "→ Opening EQ for Mac"
+open "$APP_PATH"
 
 echo ""
-echo "Installed: $APP_PATH"
+echo "Installed and opened: $APP_PATH"
 echo ""
-echo "Open it with:"
+echo "On first use, allow EQ for Mac under:"
+echo "  System Settings → Privacy & Security → Screen & System Audio Recording"
+echo ""
+echo "Future launches:"
 echo "  open \"$APP_PATH\""
-echo ""
-echo "First run: grant Screen & System Audio Recording when prompted"
-echo "(System Settings → Privacy & Security → Screen & System Audio Recording)."
-echo ""
-echo "If macOS blocks the app:"
-echo "  1. Try opening it once."
-echo "  2. Open System Settings → Privacy & Security."
-echo "  3. Click Open Anyway beside the EQ for Mac message."
-echo ""
-echo "Advanced app-only fallback:"
-echo "  xattr -dr com.apple.quarantine \"$APP_PATH\""

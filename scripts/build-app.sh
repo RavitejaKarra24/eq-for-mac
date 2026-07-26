@@ -10,9 +10,7 @@ VERSION="${VERSION:-1.0.0}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 CONFIGURATION="${CONFIGURATION:-release}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/dist}"
-CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 ARCHS="${ARCHS:-}"
-CREATE_DMG="${CREATE_DMG:-1}"
 PREBUILT_BIN_DIR="${PREBUILT_BIN_DIR:-}"
 
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
@@ -49,9 +47,7 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 APP_PATH="$OUTPUT_DIR/$APP_NAME.app"
-DMG_PATH="$OUTPUT_DIR/EQ-for-Mac-$VERSION.dmg"
 rm -rf "$APP_PATH"
-rm -f "$DMG_PATH"
 mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Resources"
 
 ditto "$BIN" "$APP_PATH/Contents/MacOS/$EXECUTABLE_NAME"
@@ -81,39 +77,11 @@ RESOURCE_PLIST="$RESOURCE_BUNDLE/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_NUMBER" "$RESOURCE_PLIST"
 /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION" "$RESOURCE_PLIST"
 
-if [[ "$CODESIGN_IDENTITY" == "-" ]]; then
-  echo "Ad-hoc signing app…"
-  codesign --force --sign - --timestamp=none "$RESOURCE_BUNDLE"
-  codesign --force --sign - --timestamp=none "$APP_PATH"
-else
-  echo "Signing app with Developer ID…"
-  codesign --force --sign "$CODESIGN_IDENTITY" --timestamp "$RESOURCE_BUNDLE"
-  codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --timestamp "$APP_PATH"
-fi
+echo "Ad-hoc signing app…"
+codesign --force --sign - --timestamp=none "$RESOURCE_BUNDLE"
+codesign --force --sign - --timestamp=none "$APP_PATH"
 
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 plutil -lint "$APP_PATH/Contents/Info.plist"
 
-if [[ "$CREATE_DMG" == "1" ]]; then
-  STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/eq-for-mac-dmg.XXXXXX")"
-  trap 'rm -rf "$STAGING_DIR"' EXIT
-  ditto "$APP_PATH" "$STAGING_DIR/$APP_NAME.app"
-  ln -s /Applications "$STAGING_DIR/Applications"
-
-  echo "Creating ${DMG_PATH}…"
-  hdiutil create \
-    -volname "$APP_NAME" \
-    -srcfolder "$STAGING_DIR" \
-    -ov \
-    -format UDZO \
-    "$DMG_PATH"
-  (
-    cd "$OUTPUT_DIR"
-    shasum -a 256 "$(basename "$DMG_PATH")" > "$(basename "$DMG_PATH").sha256"
-  )
-fi
-
-echo "Packaged: $APP_PATH"
-if [[ "$CREATE_DMG" == "1" ]]; then
-  echo "Packaged: $DMG_PATH"
-fi
+echo "Built: $APP_PATH"
