@@ -1,6 +1,6 @@
 cask "eq-for-mac" do
   version "1.0.0"
-  sha256 "24701854a7e846a9d94d27279c343cfc573e58324ebe26580a15b40deb5e9d91"
+  sha256 "529950ef43881878a43b7345df6dd8fd93f3874f7daf01814be913a7caea4f20"
 
   url "https://github.com/RavitejaKarra24/eq-for-mac/releases/download/v#{version}/EQ-for-Mac.dmg",
       verified: "github.com/RavitejaKarra24/eq-for-mac/"
