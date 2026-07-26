@@ -57,7 +57,7 @@ Artifacts are written to `dist/`. Verify them with:
 
 ```bash
 codesign --verify --deep --strict --verbose=2 "dist/EQ for Mac.app"
-lipo -verify_arch arm64 x86_64 "dist/EQ for Mac.app/Contents/MacOS/EQForMac"
+lipo "dist/EQ for Mac.app/Contents/MacOS/EQForMac" -verify_arch arm64 x86_64
 cd dist && shasum -a 256 -c EQ-for-Mac-1.0.0.dmg.sha256
 ```
 

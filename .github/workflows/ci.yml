@@ -21,8 +21,8 @@ jobs:
           OUTPUT_DIR: "${{ runner.temp }}/eq-for-mac"
         run: |
           scripts/package.sh
-          lipo -verify_arch arm64 x86_64 \
-            "${{ runner.temp }}/eq-for-mac/EQ for Mac.app/Contents/MacOS/EQForMac"
+          lipo "${{ runner.temp }}/eq-for-mac/EQ for Mac.app/Contents/MacOS/EQForMac" \
+            -verify_arch arm64 x86_64
           codesign --verify --deep --strict --verbose=2 \
             "${{ runner.temp }}/eq-for-mac/EQ for Mac.app"
           codesign -d --verbose=4 \

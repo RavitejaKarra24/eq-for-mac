@@ -38,7 +38,7 @@ jobs:
           EXECUTABLE="$APP/Contents/MacOS/EQForMac"
 
           lipo -info "$EXECUTABLE"
-          lipo -verify_arch arm64 x86_64 "$EXECUTABLE"
+          lipo "$EXECUTABLE" -verify_arch arm64 x86_64
           codesign --verify --deep --strict --verbose=2 "$APP"
           codesign -d --verbose=4 "$APP" 2>&1 | grep -q "Signature=adhoc"
 
