@@ -336,14 +336,24 @@ final class PresetStore: ObservableObject {
         withEQCount = catalog.filter(\.hasEQ).count
     }
 
+    private var resourceBundle: Bundle {
+        guard let resourceURL = Bundle.main.resourceURL,
+              let bundle = Bundle(
+                  url: resourceURL.appendingPathComponent("EQForMac_EQForMac.bundle", isDirectory: true)
+              )
+        else {
+            return .module
+        }
+        return bundle
+    }
+
     private func resolveAutoEQFile(_ fileName: String) -> URL? {
-        // Bundle.module: Resources/autoeq/<file>
-        if let url = Bundle.module.url(forResource: fileName.replacingOccurrences(of: ".txt", with: ""),
-                                       withExtension: "txt",
-                                       subdirectory: "autoeq") {
+        if let url = resourceBundle.url(forResource: fileName.replacingOccurrences(of: ".txt", with: ""),
+                                        withExtension: "txt",
+                                        subdirectory: "autoeq") {
             return url
         }
-        if let root = Bundle.module.resourceURL?
+        if let root = resourceBundle.resourceURL?
             .appendingPathComponent("autoeq", isDirectory: true)
             .appendingPathComponent(fileName),
            FileManager.default.fileExists(atPath: root.path) {
@@ -363,7 +373,7 @@ final class PresetStore: ObservableObject {
     }
 
     private func loadResourceData(name: String, ext: String) -> Data? {
-        if let url = Bundle.module.url(forResource: name, withExtension: ext) {
+        if let url = resourceBundle.url(forResource: name, withExtension: ext) {
             return try? Data(contentsOf: url)
         }
         let candidates = [
@@ -382,7 +392,7 @@ final class PresetStore: ObservableObject {
     private func loadBundledHeadphones() {
         var urls: [URL] = []
 
-        if let resourceURL = Bundle.module.resourceURL {
+        if let resourceURL = resourceBundle.resourceURL {
             let dir = resourceURL.appendingPathComponent("headphones", isDirectory: true)
             if let files = try? FileManager.default.contentsOfDirectory(
                 at: dir,

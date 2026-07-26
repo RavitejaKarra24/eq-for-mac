@@ -61,31 +61,33 @@ ditto "Sources/EQForMac/Info.plist" "$APP_PATH/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP_PATH/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP_PATH/Contents/Info.plist"
 
-# Bundle.module looks for this SwiftPM resource bundle beside the executable.
-RESOURCE_BUNDLE="$BIN_DIR/EQForMac_EQForMac.bundle"
-if [[ ! -d "$RESOURCE_BUNDLE" ]]; then
-  echo "Build failed: SwiftPM resource bundle not found at $RESOURCE_BUNDLE" >&2
+SOURCE_RESOURCE_BUNDLE="$BIN_DIR/EQForMac_EQForMac.bundle"
+if [[ ! -d "$SOURCE_RESOURCE_BUNDLE" ]]; then
+  echo "Build failed: SwiftPM resource bundle not found at $SOURCE_RESOURCE_BUNDLE" >&2
   exit 1
 fi
-ditto "$RESOURCE_BUNDLE" "$APP_PATH/Contents/MacOS/EQForMac_EQForMac.bundle"
 
-# A minimal bundle plist keeps validation and signing tools happy.
-RESOURCE_PLIST="$APP_PATH/Contents/MacOS/EQForMac_EQForMac.bundle/Info.plist"
-if [[ ! -f "$RESOURCE_PLIST" ]]; then
-  /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string com.eqformac.app.resources" "$RESOURCE_PLIST"
-  /usr/libexec/PlistBuddy -c "Add :CFBundleName string EQForMac_EQForMac" "$RESOURCE_PLIST"
-  /usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string BNDL" "$RESOURCE_PLIST"
-  /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_NUMBER" "$RESOURCE_PLIST"
-  /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION" "$RESOURCE_PLIST"
-fi
+# SwiftPM emits a flat resource bundle, but codesign requires nested bundles in a
+# macOS app to use the standard Contents/Resources layout.
+RESOURCE_BUNDLE="$APP_PATH/Contents/Resources/EQForMac_EQForMac.bundle"
+RESOURCE_CONTENTS="$RESOURCE_BUNDLE/Contents/Resources"
+mkdir -p "$RESOURCE_CONTENTS"
+ditto "$SOURCE_RESOURCE_BUNDLE" "$RESOURCE_CONTENTS"
+
+RESOURCE_PLIST="$RESOURCE_BUNDLE/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string com.eqformac.app.resources" "$RESOURCE_PLIST"
+/usr/libexec/PlistBuddy -c "Add :CFBundleName string EQForMac_EQForMac" "$RESOURCE_PLIST"
+/usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string BNDL" "$RESOURCE_PLIST"
+/usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_NUMBER" "$RESOURCE_PLIST"
+/usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION" "$RESOURCE_PLIST"
 
 if [[ "$CODESIGN_IDENTITY" == "-" ]]; then
   echo "Ad-hoc signing app…"
-  codesign --force --sign - --timestamp=none "$APP_PATH/Contents/MacOS/EQForMac_EQForMac.bundle"
+  codesign --force --sign - --timestamp=none "$RESOURCE_BUNDLE"
   codesign --force --sign - --timestamp=none "$APP_PATH"
 else
   echo "Signing app with Developer ID…"
-  codesign --force --sign "$CODESIGN_IDENTITY" --timestamp "$APP_PATH/Contents/MacOS/EQForMac_EQForMac.bundle"
+  codesign --force --sign "$CODESIGN_IDENTITY" --timestamp "$RESOURCE_BUNDLE"
   codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --timestamp "$APP_PATH"
 fi
 

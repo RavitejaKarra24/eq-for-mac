@@ -8,7 +8,7 @@ cask "eq-for-mac" do
   desc "Menu-bar system-wide equalizer using Core Audio Taps"
   homepage "https://github.com/RavitejaKarra24/eq-for-mac"
 
-  depends_on macos: ">= :sonoma"
+  depends_on macos: :sonoma
 
   app "EQ for Mac.app"
 
