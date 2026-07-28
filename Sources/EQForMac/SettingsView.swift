@@ -21,9 +21,16 @@ final class SettingsWindowController {
         if let existing = self.window {
             window = existing
         } else {
-            let hosting = NSHostingController(rootView: SettingsView(model: model))
+            let hosting = NSHostingController(
+                rootView: SettingsView(model: model)
+                    .preferredColorScheme(.dark)
+            )
+            hosting.view.wantsLayer = true
+            hosting.view.layer?.backgroundColor = NSColor.black.cgColor
             let created = NSWindow(contentViewController: hosting)
             created.title = "EQ for Mac Settings"
+            created.appearance = NSAppearance(named: .darkAqua)
+            created.backgroundColor = .black
             created.styleMask = [.titled, .closable, .miniaturizable]
             created.setContentSize(NSSize(width: 500, height: 570))
             created.minSize = NSSize(width: 460, height: 500)
@@ -50,14 +57,14 @@ private struct SettingsView: View {
                     "Launch at login",
                     detail: "Start the menu-bar EQ automatically after you sign in.",
                     isOn: model.launchAtLogin,
-                    action: model.setLaunchAtLogin
+                    action: { model.setLaunchAtLogin($0) }
                 )
 
                 settingToggle(
                     "Global shortcut",
                     detail: "Press ⌥⌘E from any app to toggle the system EQ.",
                     isOn: model.hotKeyEnabled,
-                    action: model.setHotKeyEnabled
+                    action: { model.setHotKeyEnabled($0) }
                 )
 
                 Button("Open Screen & System Audio Settings") {
@@ -71,7 +78,7 @@ private struct SettingsView: View {
                     "Clip-safe auto-preamp",
                     detail: "Continuously reserves headroom for the combined filter response.",
                     isOn: model.autoPreampEnabled,
-                    action: model.setAutoPreampEnabled
+                    action: { model.setAutoPreampEnabled($0) }
                 )
 
                 LabeledContent("Recommended") {
@@ -87,12 +94,12 @@ private struct SettingsView: View {
                 }
             }
 
-            Section("Headphone spatial controls") {
+            Section("Headphone listening") {
                 settingToggle(
                     "Crossfeed",
                     detail: "Blend a filtered, delayed opposite channel for a speaker-like image.",
                     isOn: model.crossfeedEnabled,
-                    action: model.setCrossfeedEnabled
+                    action: { model.setCrossfeedEnabled($0) }
                 )
 
                 LabeledContent("Crossfeed amount") {
@@ -100,7 +107,7 @@ private struct SettingsView: View {
                         Slider(
                             value: Binding(
                                 get: { model.crossfeedAmount },
-                                set: model.setCrossfeedAmount
+                                set: { model.setCrossfeedAmount($0) }
                             ),
                             in: 0...1
                         )
@@ -110,46 +117,6 @@ private struct SettingsView: View {
                     }
                 }
                 .disabled(!model.crossfeedEnabled)
-
-                LabeledContent("Stereo width") {
-                    HStack {
-                        Slider(
-                            value: Binding(
-                                get: { model.stereoWidth },
-                                set: model.setStereoWidth
-                            ),
-                            in: 0...2,
-                            step: 0.05
-                        )
-                        Text("\(Int(model.stereoWidth * 100))%")
-                            .frame(width: 42, alignment: .trailing)
-                            .monospacedDigit()
-                    }
-                }
-
-                LabeledContent("Balance") {
-                    HStack {
-                        Text("L")
-                            .foregroundStyle(.secondary)
-                        Slider(
-                            value: Binding(
-                                get: { model.balance },
-                                set: model.setBalance
-                            ),
-                            in: -1...1,
-                            step: 0.05
-                        )
-                        Text("R")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                settingToggle(
-                    "Mono fold-down",
-                    detail: "Mix left and right equally into both output channels.",
-                    isOn: model.monoEnabled,
-                    action: model.setMonoEnabled
-                )
             }
 
             Section("Output profile") {
@@ -208,6 +175,8 @@ private struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .background(Color.black)
         .padding(.top, 8)
         .frame(minWidth: 460, minHeight: 500)
         .onAppear {
@@ -226,10 +195,17 @@ private struct SettingsView: View {
         _ title: String,
         detail: String,
         isOn: Bool,
-        action: @escaping (Bool) -> Void
+        action: @escaping @MainActor @Sendable (Bool) -> Void
     ) -> some View {
         Toggle(
-            isOn: Binding(get: { isOn }, set: action)
+            isOn: Binding(
+                get: { isOn },
+                set: { value in
+                    MainActor.assumeIsolated {
+                        action(value)
+                    }
+                }
+            )
         ) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)

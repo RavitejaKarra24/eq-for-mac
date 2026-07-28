@@ -6,16 +6,15 @@ import Foundation
 struct HeadphoneCatalogEntry: Identifiable, Codable, Hashable, Sendable {
     var id: String { name }
     let name: String
-    /// Relative AutoEq path (documentation only; offline uses `file`).
+    /// Relative AutoEq path retained for source attribution.
     let path: String?
     let source: String?
     let hasEQ: Bool
     let autoeqName: String?
-    /// Bundled filename under Resources/autoeq/ (e.g. `a1b2c3d4e5f6.txt`).
+    /// Bundled filename under Resources/autoeq/.
     let file: String?
-    /// PEQdB Studio grouping for reference targets. Nil for headphone measurements.
+    /// PEQdB Studio grouping. Nil for headphone measurements.
     let targetCategory: String?
-    /// Alternate public names used by the source (for example a year-qualified name).
     let aliases: [String]?
 
     var isTargetCurve: Bool { targetCategory != nil }
@@ -118,6 +117,7 @@ final class PresetStore: ObservableObject {
     @Published private(set) var imported: [EQPreset] = []
     @Published private(set) var userPresets: [UserPreset] = []
     @Published private(set) var catalog: [HeadphoneCatalogEntry] = []
+    @Published private(set) var targetCurves: [HeadphoneCatalogEntry] = []
     @Published private(set) var catalogCount: Int = 0
     @Published private(set) var withEQCount: Int = 0
     @Published private(set) var favoriteHeadphoneNames: [String] = []
@@ -491,10 +491,9 @@ final class PresetStore: ObservableObject {
             )
         }
 
-        // Preferred: local file in autoeq/
         if let file = entry.file, let url = resolveAutoEQFile(file) {
             let parsed = try EqualizerAPOParser.parseFile(at: url)
-            let src = entry.source ?? "AutoEQ"
+            let source = entry.source ?? "AutoEQ"
             let preset = EQPreset(
                 name: entry.name,
                 preampDB: parsed.preampDB,
@@ -502,7 +501,7 @@ final class PresetStore: ObservableObject {
                 bandMode: .parametric,
                 isBuiltIn: true,
                 isHeadphone: true,
-                source: "AutoEQ · \(src) · offline"
+                source: "AutoEQ · \(source) · offline"
             )
             presetCache[cacheKey] = preset
             recordRecentHeadphone(entry)
@@ -807,7 +806,7 @@ final class PresetStore: ObservableObject {
         if let data = loadResourceData(name: "headphones_catalog", ext: "json"),
            let file = try? JSONDecoder().decode(HeadphonesCatalogFile.self, from: data) {
             applyCatalogFile(file)
-            appendTargetCurves()
+            loadTargetCurves()
             return
         }
 
@@ -819,7 +818,7 @@ final class PresetStore: ObservableObject {
             catalog = names.map { HeadphoneCatalogEntry(name: $0, hasEQ: false) }
             catalogCount = catalog.count
             withEQCount = 0
-            appendTargetCurves()
+            loadTargetCurves()
             return
         }
 
@@ -833,51 +832,49 @@ final class PresetStore: ObservableObject {
         var seen = Set<String>()
 
         if let graphs = file.graphs {
-            for g in graphs {
-                let key = g.name.lowercased()
+            for graph in graphs {
+                let key = graph.name.lowercased()
                 guard seen.insert(key).inserted else { continue }
-                let has = g.hasEQ ?? (g.file != nil || g.path != nil)
+                let hasEQ = graph.hasEQ ?? (graph.file != nil || graph.path != nil)
                 entries.append(
                     HeadphoneCatalogEntry(
-                        name: g.name,
-                        path: g.path,
-                        source: g.source,
-                        hasEQ: has && (g.file != nil),
-                        autoeqName: g.autoeqName,
-                        file: g.file
+                        name: graph.name,
+                        path: graph.path,
+                        source: graph.source,
+                        hasEQ: hasEQ && graph.file != nil,
+                        autoeqName: graph.autoeqName,
+                        file: graph.file
                     )
                 )
             }
         }
 
         if entries.isEmpty, let headphones = file.headphones {
-            for h in headphones {
-                let key = h.name.lowercased()
+            for headphone in headphones {
+                let key = headphone.name.lowercased()
                 guard seen.insert(key).inserted else { continue }
                 entries.append(
                     HeadphoneCatalogEntry(
-                        name: h.name,
-                        path: h.path,
-                        source: h.source,
-                        hasEQ: false,
-                        file: nil
+                        name: headphone.name,
+                        path: headphone.path,
+                        source: headphone.source
                     )
                 )
             }
         }
 
         if let extra = file.extraAutoEQ {
-            for g in extra {
-                let key = g.name.lowercased()
+            for graph in extra {
+                let key = graph.name.lowercased()
                 guard seen.insert(key).inserted else { continue }
                 entries.append(
                     HeadphoneCatalogEntry(
-                        name: g.name,
-                        path: g.path,
-                        source: g.source,
-                        hasEQ: (g.hasEQ ?? true) && g.file != nil,
-                        autoeqName: g.autoeqName,
-                        file: g.file
+                        name: graph.name,
+                        path: graph.path,
+                        source: graph.source,
+                        hasEQ: (graph.hasEQ ?? true) && graph.file != nil,
+                        autoeqName: graph.autoeqName,
+                        file: graph.file
                     )
                 )
             }
@@ -890,30 +887,24 @@ final class PresetStore: ObservableObject {
         withEQCount = catalog.filter(\.hasEQ).count
     }
 
-    private func appendTargetCurves() {
+    private func loadTargetCurves() {
         guard let data = loadResourceData(name: "target_curves", ext: "json"),
               let file = try? JSONDecoder().decode(TargetCurvesFile.self, from: data)
-        else { return }
+        else {
+            targetCurves = []
+            return
+        }
 
-        for target in file.targets {
-            let entry = HeadphoneCatalogEntry(
+        targetCurves = file.targets.map { target in
+            HeadphoneCatalogEntry(
                 name: target.name,
                 source: "PEQdB Studio",
-                hasEQ: false,
                 targetCategory: target.category,
                 aliases: target.aliases
             )
-            if let index = catalog.firstIndex(where: {
-                $0.name.caseInsensitiveCompare(target.name) == .orderedSame
-            }) {
-                catalog[index] = entry
-            } else {
-                catalog.append(entry)
-            }
+        }.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
-        catalog.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        catalogCount = catalog.count
-        withEQCount = catalog.filter(\.hasEQ).count
     }
 
     private var resourceBundle: Bundle {
@@ -928,9 +919,11 @@ final class PresetStore: ObservableObject {
     }
 
     private func resolveAutoEQFile(_ fileName: String) -> URL? {
-        if let url = resourceBundle.url(forResource: fileName.replacingOccurrences(of: ".txt", with: ""),
-                                        withExtension: "txt",
-                                        subdirectory: "autoeq") {
+        if let url = resourceBundle.url(
+            forResource: fileName.replacingOccurrences(of: ".txt", with: ""),
+            withExtension: "txt",
+            subdirectory: "autoeq"
+        ) {
             return url
         }
         if let root = resourceBundle.resourceURL?
@@ -939,9 +932,9 @@ final class PresetStore: ObservableObject {
            FileManager.default.fileExists(atPath: root.path) {
             return root
         }
-        // Dev fallbacks
         let candidates = [
-            URL(fileURLWithPath: "Sources/EQForMac/Resources/autoeq").appendingPathComponent(fileName),
+            URL(fileURLWithPath: "Sources/EQForMac/Resources/autoeq")
+                .appendingPathComponent(fileName),
             URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
                 .appendingPathComponent("Sources/EQForMac/Resources/autoeq")
                 .appendingPathComponent(fileName),
@@ -1062,7 +1055,6 @@ final class PresetStore: ObservableObject {
         if let data = try? JSONEncoder().encode(userPresets) {
             defaults.set(data, forKey: userPresetsKey)
         }
-        syncStoreStateToPreferences()
     }
 
     private func loadHeadphoneLibrary() {
@@ -1095,7 +1087,6 @@ final class PresetStore: ObservableObject {
         if let data = try? JSONEncoder().encode(state) {
             defaults.set(data, forKey: headphoneLibraryKey)
         }
-        syncStoreStateToPreferences()
     }
 
     private func canonicalizedCatalogNames(_ names: [String]) -> [String] {
@@ -1148,17 +1139,5 @@ final class PresetStore: ObservableObject {
         if let data = try? JSONEncoder().encode(deviceProfiles) {
             defaults.set(data, forKey: deviceProfilesKey)
         }
-        syncStoreStateToPreferences()
-    }
-
-    /// Keep expanded AppPreferences useful to callers while the dedicated keys
-    /// remain authoritative and immune to older EQViewModel save code.
-    private func syncStoreStateToPreferences() {
-        var preferences = AppPreferences.load(from: defaults)
-        preferences.favoritePresetIDs = userPresets.filter(\.isFavorite).map(\.id)
-        preferences.favoriteHeadphoneNames = favoriteHeadphoneNames
-        preferences.recentHeadphoneNames = recentHeadphoneNames
-        preferences.deviceProfiles = deviceProfiles
-        preferences.save(to: defaults)
     }
 }

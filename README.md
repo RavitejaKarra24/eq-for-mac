@@ -16,17 +16,17 @@ Thank you to [Sharur](https://www.youtube.com/@Sharur) and [PEQdB](https://peqdb
 
 *Lives in the menu bar — no Dock icon, no full-window app.*
 
-### 15-band EQ + headphone search
+### Interactive EQ + headphone search
 
 <img src="docs/images/eq-panel-headphone-search.png" alt="15-band graphic EQ with headphone graph search" width="450" />
 
-*Drag faders, apply genre presets, or search ~6,800 offline headphone curves.*
+*Edit the exact response curve, apply presets, or search ~6,800 offline headphone curves.*
 
 ### Offline catalog & import
 
 <img src="docs/images/headphone-catalog.png" alt="Headphone catalog list with Import EQ file" width="450" />
 
-*Browse the full offline catalog or import your own Equalizer APO / PEQdB / AutoEQ `.txt` file.*
+*Browse the full offline catalog or import any Equalizer APO / PEQdB / AutoEQ `.txt` file.*
 
 ---
 
@@ -35,15 +35,15 @@ Thank you to [Sharur](https://www.youtube.com/@Sharur) and [PEQdB](https://peqdb
 | Feature | Description |
 |--------|-------------|
 | **Live spectrum + interactive curve** | See the signal, drag response points directly, hover for Hz/dB, or double-click a point to reset |
-| **10- or 15-band graphic EQ** | Faders stay synchronized with the curve; full parametric filters are preserved while editing |
-| **6,825 searchable graphs and targets** | 6,808 headphone entries plus 17 PEQdB Studio reference targets — no internet needed |
+| **Exact owned DSP** | An Accelerate biquad cascade drives both the audio and displayed response |
+| **Full offline correction catalog** | 6,808 searchable headphone entries, plus file import |
 | **Fuzzy search, pins, and recents** | Forgiving compact-model search with favorite and recently applied headphone sections |
 | **Import EQ files** | Equalizer APO / PEQdB / AutoEQ parametric `.txt` |
 | **Built-in and personal presets** | Save, favorite, rename, reorder, and delete your own curves |
-| **Clip-safe auto-preamp** | Estimates the combined response and reserves headroom automatically or on demand |
+| **Clip-safe auto-preamp** | Computes the combined filter response and reserves headroom automatically or on demand |
 | **Instant A/B** | Toggle bypass, or hold A/B to hear dry audio and release to resume processing |
 | **Per-output profiles** | Remember a full EQ snapshot for an output device and restore it when that device becomes active |
-| **Spatial controls** | Optional crossfeed, stereo width, L/R balance, and mono fold-down |
+| **Headphone crossfeed** | Optional, focused spatial processing without duplicating macOS accessibility controls |
 | **Menu-bar power tools** | Global ⌥⌘E toggle, option-click quick controls, scroll-to-adjust preamp, and Settings |
 | **Guided permission setup** | Explains the macOS system-audio permission, opens the correct pane, and confirms it with a real engine probe |
 
@@ -142,16 +142,16 @@ rm -rf "$HOME/Applications/EQ for Mac.app"
 | Quit | **Right-click** the icon → **Quit EQ for Mac**, or use the panel footer / **⌘Q** |
 | Enable EQ | Flip the **System EQ** switch |
 | Toggle from any app | Press **⌥⌘E** after enabling the global shortcut in Settings |
-| Hear dry audio | Click **Bypass**, or press and hold **A/B** |
-| Shape the curve | Drag a point vertically; double-click it to reset; faders remain available below |
-| 10 vs 15 bands | Segmented control at the top of the panel |
+| Hear dry audio | Click **Bypass**, press **⌘B**, or hold **A/B** for a level-matched comparison |
+| Shape the curve | Drag a node vertically for gain and horizontally for frequency; click empty space to add a parametric filter; right-click a node for type, bandwidth, or delete |
 | Automatic headroom | Enable **Auto headroom**, or click **Match** beside the safe preamp value |
+| Copy filters | Click the copy button beside the active preset to copy Equalizer APO text |
 | Save a preset | **Save current** above the preset chips; right-click a saved chip to manage it |
 | Headphones | Search graphs → click a model |
 | Pin a headphone | Click the star at the right of its row |
 | Custom curve | **Import EQ file…** |
 | Remember an output | **Settings → Output profile → Remember EQ for this output** |
-| Crossfeed / width / balance / mono | **Settings → Headphone spatial controls** |
+| Crossfeed | **Settings → Headphone listening** |
 | Reset | **Reset** (flat / 0 dB) |
 
 ---
@@ -162,12 +162,13 @@ Everything needed to run ships in the repo:
 
 | Asset | Notes |
 |--------|--------|
-| `Sources/EQForMac/Resources/autoeq/*.txt` | ~6,015 parametric EQ curves |
-| `Sources/EQForMac/Resources/headphones_catalog.json` | Headphone search index (~6,808 entries) |
-| `Sources/EQForMac/Resources/graph_names.txt` | PEQdB-style graph and target name list |
-| `Sources/EQForMac/Resources/target_curves.json` | 17 categorized PEQdB Studio reference targets and search aliases |
+| `Sources/EQForMac/Resources/autoeq/*.txt` | Full bundled parametric-EQ catalog |
+| `Sources/EQForMac/Resources/headphones/` | Curated, ready-to-use offline headphone corrections |
+| `Sources/EQForMac/Resources/headphones_catalog.json` | Search index for the offline catalog |
+| `Sources/EQForMac/Resources/graph_names.txt` | PEQdB-style graph-name fallback |
+| `Sources/EQForMac/Resources/target_curves.json` | 17 reference-target metadata entries |
 | `Sources/EQForMac/Resources/AppIcon.icns` | Multi-resolution macOS application icon |
-| Installed app | Typically **~20–25 MB** on disk after `./install.sh` |
+| Installed app | Includes the complete catalog; no catalog download is required |
 
 No network is required to search or apply a bundled preset.
 
@@ -178,7 +179,8 @@ No network is required to search or apply a bundled preset.
 3. **[PEQdB Studio](https://peqdb.com/studio/)** — public graph index / archive (`scripts/fill_from_peqdb_archive.py`)
 4. **[graph.hangout.audio](https://graph.hangout.audio)** (Crinacle) — via PEQdB’s public archive where applicable
 
-Reference targets are searchable for discovery, but are deliberately not applied as standalone EQ presets: a target must be paired with a compatible headphone measurement and measurement rig.
+Reference-target metadata remains separate from headphone corrections until it
+can be paired with compatible measurement samples accurately.
 
 Equalizer APO / AutoEQ / PEQdB text format example:
 
@@ -204,10 +206,10 @@ App audio ──► (muted) CATap ──► Aggregate device IOProc
               AVAudioSourceNode
                        │
                        ▼
-        Crossfeed / width / balance / mono
+                  Crossfeed
                        │
                        ▼
-                 AVAudioUnitEQ
+          Owned RBJ biquad cascade
                        │
                        ▼
                   Peak limiter
@@ -239,10 +241,12 @@ eq-for-mac/
     ├── EQPopoverView.swift       # SwiftUI panel
     ├── EQCurveView.swift         # Interactive response + spectrum surface
     ├── EQViewModel.swift         # State + presets bridge
-    ├── AudioEngine.swift         # CATap + AVAudioEngine EQ
+    ├── AudioEngine.swift         # CATap + owned real-time render graph
     ├── AudioRingBuffer.swift
+    ├── BiquadProcessor.swift     # Allocation-free filter cascade
+    ├── EQResponse.swift          # Shared RBJ coefficients + exact response
     ├── SpectrumAnalyzer.swift    # Off-render-thread vDSP FFT
-    ├── StereoProcessor.swift     # Crossfeed / width / balance / mono + ramps
+    ├── StereoProcessor.swift     # Crossfeed + restart ramps
     ├── EQHeadroomCalculator.swift
     ├── SettingsView.swift
     ├── LoginItem.swift
@@ -250,8 +254,8 @@ eq-for-mac/
     ├── CoreAudioHelpers.swift
     ├── EQModels.swift
     ├── EqualizerAPOParser.swift  # AutoEQ / PEQdB text parser
+    ├── EqualizerAPOExporter.swift
     ├── PresetStore.swift
-    ├── VerticalSlider.swift
     ├── Info.plist
     └── Resources/                # Catalog + bundled .txt curves
 ```
@@ -264,10 +268,14 @@ Clone, edit Swift under `Sources/EQForMac/`, then:
 
 ```bash
 swift build
-swift test
 # or rebuild, reinstall, and launch the app bundle:
 ./install.sh
 ```
+
+Tests use Swift Testing (`import Testing`). Run `swift test` with Xcode 16+ or
+an official Swift toolchain that includes the Testing module. The standalone
+Command Line Tools installation is sufficient for `swift build` and
+`./install.sh`, but some CLT releases omit both Testing and XCTest.
 
 Useful starting points:
 
@@ -279,7 +287,8 @@ Useful starting points:
 | Parse more EQ file formats | `EqualizerAPOParser.swift` |
 | Catalog loading | `PresetStore.swift` |
 
-Regenerating the offline catalog (optional, for maintainers) needs Python + the AutoEq library; see comments in `scripts/`.
+Regenerating the offline catalog is optional and requires Python plus the AutoEq
+library; see the scripts under `scripts/`.
 
 ### Optional signed DMG (maintainers)
 

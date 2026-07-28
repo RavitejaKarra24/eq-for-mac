@@ -1,6 +1,18 @@
 import AppKit
 import SwiftUI
 
+private final class StatusItemScrollView: NSView {
+    var onScroll: ((NSEvent) -> Void)?
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        NSApp.currentEvent?.type == .scrollWheel ? self : nil
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        onScroll?(event)
+    }
+}
+
 @available(macOS 14.2, *)
 @MainActor
 final class MenuBarController: NSObject, NSMenuDelegate {
@@ -8,8 +20,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let viewModel: EQViewModel
     private var popover: NSPopover!
     private var eventMonitor: Any?
-    private var localScrollMonitor: Any?
-    private var globalScrollMonitor: Any?
+    private var statusItemScrollView: StatusItemScrollView?
     private var settingsWindowController: SettingsWindowController!
     private var lastScrollAdjustment = Date.distantPast
 
@@ -19,7 +30,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         setupStatusItem()
         setupPopover()
         settingsWindowController = SettingsWindowController(model: viewModel)
-        installScrollMonitors()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(showSettingsFromNotification(_:)),
@@ -35,12 +45,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     deinit {
-        if let localScrollMonitor {
-            NSEvent.removeMonitor(localScrollMonitor)
-        }
-        if let globalScrollMonitor {
-            NSEvent.removeMonitor(globalScrollMonitor)
-        }
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -60,17 +64,28 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             button.action = #selector(statusItemClicked(_:))
             // Send both left and right mouse clicks to our action.
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            let scrollView = StatusItemScrollView(frame: button.bounds)
+            scrollView.autoresizingMask = [.width, .height]
+            scrollView.onScroll = { [weak self] event in
+                self?.handleStatusItemScroll(event)
+            }
+            button.addSubview(scrollView)
+            statusItemScrollView = scrollView
         }
     }
 
     private func setupPopover() {
         popover = NSPopover()
-        popover.contentSize = NSSize(width: 500, height: 700)
+        popover.contentSize = NSSize(width: 500, height: 560)
         popover.behavior = .transient
         popover.animates = true
-        popover.contentViewController = NSHostingController(
+        popover.appearance = NSAppearance(named: .darkAqua)
+        let hostingController = NSHostingController(
             rootView: EQPopoverView(model: viewModel)
         )
+        hostingController.view.wantsLayer = true
+        hostingController.view.layer?.backgroundColor = NSColor.black.cgColor
+        popover.contentViewController = hostingController
     }
 
     // MARK: - Clicks
@@ -98,10 +113,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             removeEventMonitor()
         } else {
             viewModel.refreshPermission()
-            // Refresh hosting view content size after first show
-            popover.contentViewController = NSHostingController(
-                rootView: EQPopoverView(model: viewModel)
-            )
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             button.isHighlighted = true
             installEventMonitor()
@@ -312,30 +323,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     // MARK: - Scroll-to-adjust preamp
-
-    private func installScrollMonitors() {
-        localScrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) {
-            [weak self] event in
-            guard let self, self.pointerIsOverStatusItem() else { return event }
-            self.handleStatusItemScroll(event)
-            return nil
-        }
-
-        globalScrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) {
-            [weak self] event in
-            Task { @MainActor in
-                guard let self, self.pointerIsOverStatusItem() else { return }
-                self.handleStatusItemScroll(event)
-            }
-        }
-    }
-
-    private func pointerIsOverStatusItem() -> Bool {
-        guard let button = statusItem.button, let window = button.window else { return false }
-        let rectInWindow = button.convert(button.bounds, to: nil)
-        let rectOnScreen = window.convertToScreen(rectInWindow)
-        return rectOnScreen.contains(NSEvent.mouseLocation)
-    }
 
     private func handleStatusItemScroll(_ event: NSEvent) {
         guard abs(event.scrollingDeltaY) >= 0.1,

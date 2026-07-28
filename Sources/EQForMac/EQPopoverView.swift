@@ -8,6 +8,10 @@ struct EQPopoverView: View {
     @ObservedObject private var permission = PermissionMonitor.shared
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isCatalogExpanded = false
+    @State private var isNamingPreset = false
+    @State private var renamingPresetID: UUID?
+    @State private var presetNameDraft = ""
 
     init(model: EQViewModel) {
         self.model = model
@@ -52,21 +56,9 @@ struct EQPopoverView: View {
                 .padding(.bottom, 14)
             }
         }
-        .frame(width: 500, height: 700)
-        .background {
-            ZStack {
-                Color(nsColor: .windowBackgroundColor)
-                // Subtle top sheen — studio glass
-                LinearGradient(
-                    colors: [
-                        Color.primary.opacity(colorScheme == .dark ? 0.06 : 0.03),
-                        Color.clear,
-                    ],
-                    startPoint: .top,
-                    endPoint: .init(x: 0.5, y: 0.35)
-                )
-            }
-        }
+        .frame(width: 500, height: 560)
+        .background(Color.black)
+        .preferredColorScheme(.dark)
         .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: permission.shouldShowBanner)
         .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: model.eqEnabled)
         .onAppear {
@@ -171,12 +163,15 @@ struct EQPopoverView: View {
                 .controlSize(.small)
                 .tint(model.isBypassed ? .orange : .secondary)
                 .disabled(!model.eqEnabled)
-                .help(model.isBypassed ? "Resume processed audio" : "Bypass EQ (B)")
-                .keyboardShortcut("b", modifiers: [])
+                .help(model.isBypassed ? "Resume processed audio" : "Bypass EQ (⌘B)")
+                .keyboardShortcut("b", modifiers: .command)
 
                 DryCompareControl(
                     isActive: model.isComparing,
-                    isEnabled: model.eqEnabled,
+                    isEnabled: model.eqEnabled
+                        && !model.isBypassed
+                        && model.hasDryComparisonDifference,
+                    helpText: dryComparisonHelp,
                     onPress: model.beginDryComparison,
                     onRelease: model.endDryComparison
                 )
@@ -256,6 +251,19 @@ struct EQPopoverView: View {
         }
     }
 
+    private var dryComparisonHelp: String {
+        if !model.eqEnabled {
+            return "Turn on System EQ before comparing."
+        }
+        if model.isBypassed {
+            return "Resume processing before starting A/B comparison."
+        }
+        if !model.hasDryComparisonDifference {
+            return "The current curve has no active filter shaping, so A and B are identical."
+        }
+        return "Press and hold to hear level-matched dry audio; release to resume EQ."
+    }
+
     // MARK: - EQ Board (hero)
 
     private var eqBoard: some View {
@@ -263,16 +271,6 @@ struct EQPopoverView: View {
             HStack(alignment: .center, spacing: 10) {
                 Text("Equalizer")
                     .font(.subheadline.weight(.semibold))
-
-                Picker("Bands", selection: $model.bandMode) {
-                    Text("10").tag(EQBandMode.ten)
-                    Text("15").tag(EQBandMode.fifteen)
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 110)
-                .controlSize(.small)
-                .labelsHidden()
-                .accessibilityLabel("Band count")
 
                 Spacer()
 
@@ -283,6 +281,23 @@ struct EQPopoverView: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
                     .background(Capsule().fill(Color.primary.opacity(0.06)))
+
+                if model.hasUserOverlays {
+                    Button("Revert source") {
+                        model.revertToSourceCurve()
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption.weight(.medium))
+                    .help("Remove curve edits and restore the imported filters")
+                }
+
+                Button {
+                    model.copyFiltersToPasteboard()
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+                .help("Copy Equalizer APO filters")
 
                 Button("Reset") {
                     model.resetFlat()
@@ -295,17 +310,36 @@ struct EQPopoverView: View {
 
             LiveEQCurveSurface(
                 audioEngine: model.audioEngine,
-                gains: model.gains,
-                frequencies: model.frequencies,
+                gains: model.editorGains,
+                frequencies: model.editorFrequencies,
+                responseGains: model.responseGains,
+                responseFrequencies: model.responseFrequencies,
                 isEditable: model.eqEnabled,
-                onGainChange: { index, gain in
-                    model.setGain(gain, at: index)
+                allowsParametricEditing: model.hasParametricFilters,
+                onBandChange: { index, frequency, gain in
+                    model.setEditorBand(
+                        at: index,
+                        frequency: frequency,
+                        gain: gain
+                    )
                 },
                 onResetBand: { index in
-                    model.resetBand(at: index)
+                    model.setEditorBand(
+                        at: index,
+                        frequency: model.editorFrequencies[index],
+                        gain: 0
+                    )
+                },
+                onAddBand: model.addEditorBand,
+                onDeleteBand: model.deleteEditorBand,
+                onFilterTypeChange: { index, type in
+                    model.setEditorBandType(type, at: index)
+                },
+                onBandwidthChange: { index, bandwidth in
+                    model.setEditorBandwidth(bandwidth, at: index)
                 }
             )
-            .frame(height: 138)
+            .frame(height: 190)
             .opacity(model.eqEnabled ? 1 : 0.50)
             .background {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -315,50 +349,8 @@ struct EQPopoverView: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
             }
-            .help("Drag a response point to adjust gain; double-click it to reset")
-
-            VStack(spacing: 6) {
-                HStack(alignment: .bottom, spacing: 0) {
-                    ForEach(Array(model.gains.indices), id: \.self) { index in
-                        BandColumn(
-                            gain: binding(for: index),
-                            frequencyLabel: model.frequencyLabels[index],
-                            isEnabled: model.eqEnabled
-                        )
-                    }
-                }
-
-                HStack {
-                    regionLabel("BASS")
-                    Spacer()
-                    Text(model.hasParametricFilters ? "PARAMETRIC · FULL FILTERS PRESERVED" : "GRAPHIC")
-                        .font(.system(size: 8, weight: .semibold, design: .rounded))
-                        .tracking(0.6)
-                        .foregroundStyle(.tertiary)
-                    Spacer()
-                    regionLabel("TREBLE")
-                }
-                .padding(.horizontal, 4)
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 9)
-            .frame(height: 178)
-            .background {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color.primary.opacity(colorScheme == .dark ? 0.04 : 0.025))
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
-            }
+            .help("Drag a node to adjust gain; the line is the exact rendered response")
         }
-    }
-
-    private func regionLabel(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 9, weight: .semibold, design: .rounded))
-            .tracking(1.1)
-            .foregroundStyle(.tertiary)
     }
 
     // MARK: - Preamp
@@ -375,7 +367,7 @@ struct EQPopoverView: View {
                 Slider(
                     value: Binding(
                         get: { model.preampDB },
-                        set: model.setPreampDB
+                        set: { model.setPreampDB($0) }
                     ),
                     in: -24...6,
                     step: 0.5
@@ -401,7 +393,7 @@ struct EQPopoverView: View {
                     "Auto headroom",
                     isOn: Binding(
                         get: { model.autoPreampEnabled },
-                        set: model.setAutoPreampEnabled
+                        set: { model.setAutoPreampEnabled($0) }
                     )
                 )
                 .toggleStyle(.switch)
@@ -423,6 +415,33 @@ struct EQPopoverView: View {
                     .help("Apply the calculated clip-safe preamp")
                 }
             }
+
+            HStack(spacing: 8) {
+                Text(
+                    "Latency: \(Int(model.audioEngine.measuredLatencyMilliseconds.rounded())) ms"
+                )
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Picker(
+                    "Latency budget",
+                    selection: Binding(
+                        get: { model.audioEngine.latencyMode },
+                        set: { model.audioEngine.setLatencyMode($0) }
+                    )
+                ) {
+                    ForEach(AudioEngine.LatencyMode.allCases, id: \.self) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 190)
+                .controlSize(.mini)
+                .help("Trade queue safety against audio/video latency")
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -440,7 +459,10 @@ struct EQPopoverView: View {
                 sectionHeader("Presets", systemImage: "square.stack.3d.up")
                 Spacer()
                 Button {
-                    model.saveCurrentPresetPrompt()
+                    presetNameDraft = model.suggestedCustomPresetName()
+                    renamingPresetID = nil
+                    isNamingPreset = true
+                    model.systemFeatureError = nil
                 } label: {
                     Label("Save current", systemImage: "plus")
                         .font(.caption.weight(.medium))
@@ -498,7 +520,69 @@ struct EQPopoverView: View {
                     .padding(.vertical, 1)
                 }
             }
+
+            if isNamingPreset || renamingPresetID != nil {
+                presetNameEditor
+            }
         }
+    }
+
+    private var presetNameEditor: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(renamingPresetID == nil ? "Save current EQ" : "Rename preset")
+                .font(.caption.weight(.semibold))
+            HStack(spacing: 6) {
+                TextField("Preset name", text: $presetNameDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(performPresetNameAction)
+                Button(renamingPresetID == nil ? "Save" : "Rename") {
+                    performPresetNameAction()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(
+                    presetNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .isEmpty
+                )
+                Button("Cancel") {
+                    closePresetNameEditor()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            if let error = model.systemFeatureError {
+                Text(error)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding(8)
+        .background {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.045))
+        }
+    }
+
+    private func performPresetNameAction() {
+        let name = presetNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        let succeeded: Bool
+        if let id = renamingPresetID,
+           let preset = model.presetStore.userPreset(id: id) {
+            succeeded = model.renameUserPreset(preset, to: name)
+        } else {
+            succeeded = model.saveCurrentPreset(named: name)
+        }
+        if succeeded {
+            closePresetNameEditor()
+        }
+    }
+
+    private func closePresetNameEditor() {
+        isNamingPreset = false
+        renamingPresetID = nil
+        presetNameDraft = ""
+        model.systemFeatureError = nil
     }
 
     private func userPresetChip(_ userPreset: UserPreset) -> some View {
@@ -540,7 +624,10 @@ struct EQPopoverView: View {
                 model.toggleFavorite(userPreset)
             }
             Button("Rename…") {
-                model.renameUserPresetPrompt(userPreset)
+                presetNameDraft = userPreset.name
+                isNamingPreset = false
+                renamingPresetID = userPreset.id
+                model.systemFeatureError = nil
             }
             Button("Move Earlier") {
                 model.moveUserPreset(userPreset, by: -1)
@@ -561,7 +648,18 @@ struct EQPopoverView: View {
     private var headphoneSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                sectionHeader("Headphone graphs", systemImage: "headphones")
+                Button {
+                    withAnimation(reduceMotion ? nil : .snappy(duration: 0.18)) {
+                        isCatalogExpanded.toggle()
+                    }
+                } label: {
+                    Label(
+                        isCatalogExpanded ? "Hide headphone search" : "Find headphone correction",
+                        systemImage: isCatalogExpanded ? "chevron.up" : "headphones"
+                    )
+                    .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.borderless)
                 Spacer()
                 if model.isLoadingHeadphone {
                     ProgressView()
@@ -575,6 +673,7 @@ struct EQPopoverView: View {
                     .background(Capsule().fill(Color.primary.opacity(0.05)))
             }
 
+            if isCatalogExpanded {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 12, weight: .medium))
@@ -704,6 +803,7 @@ struct EQPopoverView: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
             .help("Import Equalizer APO / PEQdB / AutoEQ parametric .txt")
+            }
         }
     }
 
@@ -771,17 +871,6 @@ struct EQPopoverView: View {
             .padding(.bottom, 3)
     }
 
-    private func binding(for index: Int) -> Binding<Float> {
-        Binding(
-            get: {
-                guard index < model.gains.count else { return 0 }
-                return model.gains[index]
-            },
-            set: { newValue in
-                model.setGain(newValue, at: index)
-            }
-        )
-    }
 }
 
 // MARK: - Isolated spectrum surface
@@ -793,18 +882,32 @@ private struct LiveEQCurveSurface: View {
     @ObservedObject var audioEngine: AudioEngine
     var gains: [Float]
     var frequencies: [Float]
+    var responseGains: [Float]
+    var responseFrequencies: [Float]
     var isEditable: Bool
-    var onGainChange: (Int, Float) -> Void
+    var allowsParametricEditing: Bool
+    var onBandChange: (Int, Float, Float) -> Void
     var onResetBand: (Int) -> Void
+    var onAddBand: (Float, Float) -> Void
+    var onDeleteBand: (Int) -> Void
+    var onFilterTypeChange: (Int, EQFilterType) -> Void
+    var onBandwidthChange: (Int, Float) -> Void
 
     var body: some View {
         EQCurveView(
             gains: gains,
             frequencies: frequencies,
+            responseGains: responseGains,
+            responseFrequencies: responseFrequencies,
             spectrumMagnitudes: audioEngine.spectrumMagnitudes,
             isEditable: isEditable,
-            onGainChange: onGainChange,
-            onResetBand: onResetBand
+            allowsParametricEditing: allowsParametricEditing,
+            onBandChange: onBandChange,
+            onResetBand: onResetBand,
+            onAddBand: onAddBand,
+            onDeleteBand: onDeleteBand,
+            onFilterTypeChange: onFilterTypeChange,
+            onBandwidthChange: onBandwidthChange
         )
     }
 }
@@ -814,16 +917,17 @@ private struct LiveEQCurveSurface: View {
 private struct DryCompareControl: View {
     var isActive: Bool
     var isEnabled: Bool
+    var helpText: String
     var onPress: () -> Void
     var onRelease: () -> Void
 
     @State private var isPressed = false
 
     var body: some View {
-        Text("A/B")
+        Text(isActive ? "B · DRY" : "A · EQ")
             .font(.system(.caption2, design: .rounded).weight(.bold))
             .foregroundStyle(isActive ? Color.orange : Color.primary)
-            .frame(width: 30, height: 22)
+            .frame(width: 52, height: 22)
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(isActive ? Color.orange.opacity(0.16) : Color.primary.opacity(0.06))
@@ -856,46 +960,15 @@ private struct DryCompareControl: View {
                     onRelease()
                 }
             }
-            .help("Hold to hear the dry signal; release to compare")
+            .help(helpText)
             .accessibilityElement()
-            .accessibilityLabel("Hold to compare dry signal")
-            .accessibilityValue(isActive ? "Dry" : "Processed")
-            .accessibilityHint("Use the adjacent bypass button for a VoiceOver-accessible toggle.")
-    }
-}
-
-// MARK: - Band column
-
-private struct BandColumn: View {
-    @Binding var gain: Float
-    var frequencyLabel: String
-    var isEnabled: Bool
-
-    var body: some View {
-        VStack(spacing: 4) {
-            Text(gainLabel(gain))
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .foregroundStyle(abs(gain) < 0.05 ? Color.secondary.opacity(0.55) : Color.primary.opacity(0.85))
-                .frame(height: 12)
-                .contentTransition(.numericText())
-
-            VerticalSlider(value: $gain, range: -12...12, height: 124, isActive: isEnabled)
-                .frame(maxWidth: .infinity)
-
-            Text(frequencyLabel)
-                .font(.system(size: 8, weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-        }
-        .frame(maxWidth: .infinity)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(frequencyLabel) hertz")
-    }
-
-    private func gainLabel(_ g: Float) -> String {
-        if abs(g) < 0.05 { return "0" }
-        return String(format: "%+.0f", g)
+            .accessibilityLabel("A/B audio comparison")
+            .accessibilityValue(isActive ? "B, level-matched dry" : "A, processed EQ")
+            .accessibilityHint(
+                isEnabled
+                    ? "Press and hold for dry audio, then release to resume EQ."
+                    : helpText
+            )
     }
 }
 

@@ -8,64 +8,102 @@ import os.log
 
 private let log = OSLog(subsystem: "com.eqformac.app", category: "audio")
 
-// MARK: - Real-time callback state (must be free of actor isolation)
+/// Per-graph render state. Its strong capture by `AVAudioSourceNode` ties the
+/// scratch storage and processors to the render block's lifetime.
+final class AudioRenderContext: @unchecked Sendable {
+    let ringBuffer: AudioRingBuffer
+    let stereoProcessor: StereoProcessor
+    let biquadProcessor: BiquadProcessor
+    private let channelCount: Int
+    private let targetFillSamples: Int
+    private let scratchCapacity: Int
+    private let scratch: UnsafeMutablePointer<Float>
+    private var isPrimed = false
 
-nonisolated(unsafe) private var rtRingBuffer: AudioRingBuffer?
-nonisolated(unsafe) private var rtChannelCount: UInt32 = 2
-nonisolated(unsafe) private var rtScratchBuffer: UnsafeMutablePointer<Float>?
-nonisolated(unsafe) private var rtScratchCapacity: Int = 0
-nonisolated(unsafe) private var rtStereoProcessor: StereoProcessor?
+    init(
+        ringBuffer: AudioRingBuffer,
+        channelCount: Int,
+        scratchFrameCapacity: Int,
+        targetFillFrames: Int,
+        stereoProcessor: StereoProcessor,
+        biquadProcessor: BiquadProcessor
+    ) {
+        self.ringBuffer = ringBuffer
+        self.channelCount = max(1, channelCount)
+        targetFillSamples = max(0, targetFillFrames) * self.channelCount
+        self.stereoProcessor = stereoProcessor
+        self.biquadProcessor = biquadProcessor
+        scratchCapacity = scratchFrameCapacity * self.channelCount
+        scratch = .allocate(capacity: scratchCapacity)
+        scratch.initialize(repeating: 0, count: scratchCapacity)
+    }
 
-/// AVAudioSourceNode render block: pull interleaved samples from the ring buffer
-/// and deinterleave into the engine's non-interleaved format.
-private func renderCallback(
-    _: UnsafeMutablePointer<ObjCBool>,
-    _: UnsafePointer<AudioTimeStamp>,
-    frameCount: UInt32,
-    audioBufferList: UnsafeMutablePointer<AudioBufferList>
-) -> OSStatus {
-    let channels = Int(rtChannelCount)
-    let frames = Int(frameCount)
-    let interleavedCount = frames * channels
-    let bufferList = UnsafeMutableAudioBufferListPointer(audioBufferList)
+    deinit {
+        scratch.deallocate()
+    }
 
-    guard let ringBuf = rtRingBuffer,
-          let scratch = rtScratchBuffer,
-          rtScratchCapacity >= interleavedCount
-    else {
+    @inline(__always)
+    func render(
+        frameCount: UInt32,
+        audioBufferList: UnsafeMutablePointer<AudioBufferList>
+    ) -> OSStatus {
+        let frames = Int(frameCount)
+        let interleavedCount = frames * channelCount
+        let bufferList = UnsafeMutableAudioBufferListPointer(audioBufferList)
+        guard interleavedCount <= scratchCapacity else {
+            zero(bufferList)
+            return noErr
+        }
+
+        let available = ringBuffer.availableSamples
+        if !isPrimed {
+            guard available >= targetFillSamples + interleavedCount else {
+                zero(bufferList)
+                return noErr
+            }
+            isPrimed = true
+        } else if available > targetFillSamples + interleavedCount * 4 {
+            ringBuffer.trimBacklog(
+                keepingAtMost: targetFillSamples + interleavedCount
+            )
+        }
+
+        let read = ringBuffer.read(scratch, count: interleavedCount)
+        if read < interleavedCount {
+            memset(
+                scratch.advanced(by: read),
+                0,
+                (interleavedCount - read) * MemoryLayout<Float>.stride
+            )
+        }
+
+        var unity: Float = 1
+        for channelIndex in 0..<bufferList.count {
+            guard let output = bufferList[channelIndex].mData?
+                .assumingMemoryBound(to: Float.self)
+            else { continue }
+            let sourceChannel = min(channelIndex, channelCount - 1)
+            vDSP_vsmul(
+                scratch.advanced(by: sourceChannel),
+                vDSP_Stride(channelCount),
+                &unity,
+                output,
+                1,
+                vDSP_Length(frames)
+            )
+        }
+        stereoProcessor.process(bufferList, frameCount: frames)
+        biquadProcessor.process(bufferList, frameCount: frames)
+        return noErr
+    }
+
+    private func zero(_ bufferList: UnsafeMutableAudioBufferListPointer) {
         for buffer in bufferList {
             if let data = buffer.mData {
                 memset(data, 0, Int(buffer.mDataByteSize))
             }
         }
-        return noErr
     }
-
-    let read = ringBuf.read(scratch, count: interleavedCount)
-    if read < interleavedCount {
-        memset(
-            scratch.advanced(by: read),
-            0,
-            (interleavedCount - read) * MemoryLayout<Float>.stride
-        )
-    }
-
-    var unity: Float = 1
-    for channelIndex in 0..<bufferList.count {
-        guard let outData = bufferList[channelIndex].mData?.assumingMemoryBound(to: Float.self)
-        else { continue }
-        let sourceChannel = min(channelIndex, channels - 1)
-        vDSP_vsmul(
-            scratch.advanced(by: sourceChannel),
-            vDSP_Stride(channels),
-            &unity,
-            outData,
-            1,
-            vDSP_Length(frames)
-        )
-    }
-    rtStereoProcessor?.process(bufferList, frameCount: frames)
-    return noErr
 }
 
 // MARK: - AudioEngine
@@ -74,11 +112,33 @@ private func renderCallback(
 ///
 /// Pipeline:
 ///   Apps → (muted) CATap → Aggregate Device IOProc → Ring Buffer
-///        → AVAudioSourceNode/Stereo Stage → AVAudioUnitEQ → Peak Limiter
+///        → AVAudioSourceNode/Crossfeed/RBJ biquads → Peak Limiter
 ///        → Output Device
 @available(macOS 14.2, *)
 @MainActor
 final class AudioEngine: ObservableObject {
+    enum LatencyMode: String, CaseIterable, Sendable {
+        case low = "Low"
+        case balanced = "Balanced"
+        case safe = "Safe"
+
+        var targetMilliseconds: Double {
+            switch self {
+            case .low: return 8
+            case .balanced: return 20
+            case .safe: return 50
+            }
+        }
+
+        var capacityMilliseconds: Double {
+            switch self {
+            case .low: return 40
+            case .balanced: return 100
+            case .safe: return 250
+            }
+        }
+    }
+
     @Published private(set) var isRunning = false
     @Published private(set) var outputDeviceName = "Unknown"
     @Published private(set) var outputDeviceUID: String?
@@ -90,9 +150,8 @@ final class AudioEngine: ObservableObject {
         count: SpectrumAnalyzer.binCount
     )
     @Published private(set) var crossfeedIntensity: Float = 0
-    @Published private(set) var stereoWidth: Float = 1
-    @Published private(set) var balance: Float = 0
-    @Published private(set) var monoEnabled = false
+    @Published private(set) var measuredLatencyMilliseconds: Double = 0
+    @Published private(set) var latencyMode: LatencyMode = .balanced
     @Published var bypassed = false {
         didSet {
             applyEQ()
@@ -104,30 +163,36 @@ final class AudioEngine: ObservableObject {
     private var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
     private var procID: AudioDeviceIOProcID?
     private var engine: AVAudioEngine?
-    private var eqNode: AVAudioUnitEQ?
     private var limiterNode: AVAudioUnitEffect?
     private var sourceNode: AVAudioSourceNode?
     private var ringBuffer: AudioRingBuffer?
     private var spectrumAnalyzer: SpectrumAnalyzer?
     private var stereoProcessor: StereoProcessor?
+    private var biquadProcessor: BiquadProcessor?
+    private var renderContext: AudioRenderContext?
     private var tapUUID = UUID()
-    private var deviceChangeListener: AudioObjectPropertyListenerBlock?
-    private var outputFormatListener: AudioObjectPropertyListenerBlock?
+    nonisolated(unsafe) private var deviceChangeListener: AudioObjectPropertyListenerBlock?
+    nonisolated(unsafe) private var outputFormatListener: AudioObjectPropertyListenerBlock?
     private var observedOutputDeviceID = AudioObjectID(kAudioObjectUnknown)
-    private var restartWorkItem: DispatchWorkItem?
+    nonisolated(unsafe) private var restartWorkItem: DispatchWorkItem?
+    private var startupTask: Task<Void, Never>?
+    nonisolated(unsafe) private var latencyTimer: Timer?
     private var restartGeneration: UInt64 = 0
     private var spectrumMonitoringEnabled = false
     private var activePreset: EQPreset = .flat()
-    // Imported presets commonly use 10 bands; non-destructive curve edits add
-    // overlay filters instead of replacing them, so leave ample headroom.
-    private let maxBandSlots = 64
     private let renderScratchFrameCapacity = 16_384
     private var sampleRate: Double = 48_000
+    private var activeChannelCount = 2
 
     var onStateChange: (() -> Void)?
     var onOutputDeviceChange: ((_ uid: String, _ name: String) -> Void)?
 
     init() {
+        if let rawValue = UserDefaults.standard.string(
+            forKey: "EQForMac.latencyMode"
+        ), let storedMode = LatencyMode(rawValue: rawValue) {
+            latencyMode = storedMode
+        }
         do {
             let id = try getDefaultOutputDeviceID()
             refreshOutputDeviceInfo(id, notify: false)
@@ -180,25 +245,38 @@ final class AudioEngine: ObservableObject {
             )
         }
         restartWorkItem?.cancel()
+        latencyTimer?.invalidate()
     }
 
     // MARK: - Public control
 
     func setEnabled(_ enabled: Bool) {
         if enabled {
-            do {
-                try start()
-                errorMessage = nil
-            } catch {
-                tearDownAudioGraph(notify: false)
-                errorMessage = error.localizedDescription
-                isRunning = false
-                os_log(.error, log: log, "start failed: %{public}@", error.localizedDescription)
+            guard !isRunning, startupTask == nil else { return }
+            startupTask = Task { [weak self] in
+                guard let self else { return }
+                defer { startupTask = nil }
+                do {
+                    try await start()
+                    errorMessage = nil
+                } catch is CancellationError {
+                    tearDownAudioGraph(notify: false)
+                } catch {
+                    tearDownAudioGraph(notify: false)
+                    errorMessage = error.localizedDescription
+                    isRunning = false
+                    os_log(
+                        .error,
+                        log: log,
+                        "start failed: %{public}@",
+                        error.localizedDescription
+                    )
+                }
+                onStateChange?()
             }
         } else {
             stop()
         }
-        onStateChange?()
     }
 
     func setSpectrumMonitoringEnabled(_ enabled: Bool) {
@@ -211,19 +289,13 @@ final class AudioEngine: ObservableObject {
         updateStereoProcessorSettings()
     }
 
-    func setStereoWidth(_ width: Float) {
-        stereoWidth = max(0, min(2, width))
-        updateStereoProcessorSettings()
-    }
-
-    func setBalance(_ balance: Float) {
-        self.balance = max(-1, min(1, balance))
-        updateStereoProcessorSettings()
-    }
-
-    func setMonoEnabled(_ enabled: Bool) {
-        monoEnabled = enabled
-        updateStereoProcessorSettings()
+    func setLatencyMode(_ mode: LatencyMode) {
+        guard latencyMode != mode else { return }
+        latencyMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: "EQForMac.latencyMode")
+        if isRunning {
+            scheduleRestart(reconnectDelay: 0)
+        }
     }
 
     func apply(preset: EQPreset) {
@@ -234,7 +306,7 @@ final class AudioEngine: ObservableObject {
 
     // MARK: - Start / Stop
 
-    func start() throws {
+    func start() async throws {
         guard !isRunning else { return }
         errorMessage = nil
 
@@ -252,13 +324,16 @@ final class AudioEngine: ObservableObject {
         var myPID = ProcessInfo.processInfo.processIdentifier
         var myProcessObjectID = AudioObjectID(kAudioObjectUnknown)
         var processObjectSize = UInt32(MemoryLayout<AudioObjectID>.size)
-        AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &translateAddress,
-            UInt32(MemoryLayout<pid_t>.size),
-            &myPID,
-            &processObjectSize,
-            &myProcessObjectID
+        try caCheck(
+            AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject),
+                &translateAddress,
+                UInt32(MemoryLayout<pid_t>.size),
+                &myPID,
+                &processObjectSize,
+                &myProcessObjectID
+            ),
+            "Failed to identify EQ for Mac's audio process"
         )
 
         // Create muted global stereo tap.
@@ -298,7 +373,17 @@ final class AudioEngine: ObservableObject {
         )
         var deviceRate: Float64 = 0
         var rateSize = UInt32(MemoryLayout<Float64>.size)
-        AudioObjectGetPropertyData(outputDeviceID, &rateAddress, 0, nil, &rateSize, &deviceRate)
+        try caCheck(
+            AudioObjectGetPropertyData(
+                outputDeviceID,
+                &rateAddress,
+                0,
+                nil,
+                &rateSize,
+                &deviceRate
+            ),
+            "Failed to read output sample rate"
+        )
         let rate = deviceRate > 0 ? deviceRate : tapFormat.mSampleRate
         sampleRate = rate
 
@@ -334,36 +419,19 @@ final class AudioEngine: ObservableObject {
             "Failed to create aggregate device"
         )
 
-        // Wait until device is alive
-        var aliveAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyDeviceIsAlive,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        for _ in 0..<30 {
-            var alive: UInt32 = 0
-            var aliveSize = UInt32(MemoryLayout<UInt32>.size)
-            AudioObjectGetPropertyData(aggregateDeviceID, &aliveAddress, 0, nil, &aliveSize, &alive)
-            if alive != 0 { break }
-            Thread.sleep(forTimeInterval: 0.05)
-        }
+        try await waitUntilDeviceIsAlive(aggregateDeviceID)
+        try Task.checkCancellation()
 
         // Ring buffer + AVAudioEngine
         let ring = AudioRingBuffer(
-            capacityFrames: Int(rate * 0.5),
+            capacityFrames: Int(
+                rate * latencyMode.capacityMilliseconds / 1_000
+            ),
             channels: Int(channels),
             overrunBehavior: .discardStaleOnRead
         )
         ringBuffer = ring
-        rtRingBuffer = ring
-        rtChannelCount = channels
-
-        let requiredScratchSamples = renderScratchFrameCapacity * Int(channels)
-        let oldScratch = rtScratchBuffer
-        rtScratchBuffer = .allocate(capacity: requiredScratchSamples)
-        rtScratchBuffer?.initialize(repeating: 0, count: requiredScratchSamples)
-        rtScratchCapacity = requiredScratchSamples
-        oldScratch?.deallocate()
+        activeChannelCount = Int(channels)
 
         let avEngine = AVAudioEngine()
 
@@ -388,7 +456,6 @@ final class AudioEngine: ObservableObject {
 
         let processor = StereoProcessor(sampleRate: rate)
         stereoProcessor = processor
-        rtStereoProcessor = processor
         updateStereoProcessorSettings()
         processor.scheduleGainRamp(
             to: 1,
@@ -407,14 +474,35 @@ final class AudioEngine: ObservableObject {
         analyzer?.setMonitoringEnabled(spectrumMonitoringEnabled)
         spectrumAnalyzer = analyzer
 
-        let source = AVAudioSourceNode(format: format, renderBlock: renderCallback)
+        let biquad = BiquadProcessor(
+            sampleRate: rate,
+            channelCount: Int(channels)
+        )
+        biquad.update(
+            bands: activePreset.bands,
+            preampDB: activePreset.preampDB,
+            bypassed: bypassed
+        )
+        biquadProcessor = biquad
+        let context = AudioRenderContext(
+            ringBuffer: ring,
+            channelCount: Int(channels),
+            scratchFrameCapacity: renderScratchFrameCapacity,
+            targetFillFrames: Int(
+                rate * latencyMode.targetMilliseconds / 1_000
+            ),
+            stereoProcessor: processor,
+            biquadProcessor: biquad
+        )
+        renderContext = context
+        let source = AVAudioSourceNode(format: format) {
+            _, _, frameCount, audioBufferList in
+            context.render(
+                frameCount: frameCount,
+                audioBufferList: audioBufferList
+            )
+        }
         sourceNode = source
-
-        let eq = AVAudioUnitEQ(numberOfBands: maxBandSlots)
-        configureEQBands(eq, with: activePreset)
-        eq.globalGain = max(-24, min(6, activePreset.preampDB))
-        eq.bypass = bypassed || activePreset.isFlat
-        eqNode = eq
 
         // Soft peak limiter to avoid clipping after boosts
         let limiterDesc = AudioComponentDescription(
@@ -429,14 +517,12 @@ final class AudioEngine: ObservableObject {
         AudioUnitSetParameter(au, kLimiterParam_AttackTime, kAudioUnitScope_Global, 0, 0.007, 0)
         AudioUnitSetParameter(au, kLimiterParam_DecayTime, kAudioUnitScope_Global, 0, 0.05, 0)
         AudioUnitSetParameter(au, kLimiterParam_PreGain, kAudioUnitScope_Global, 0, 0, 0)
-        limiter.bypass = bypassed
+        limiter.bypass = false
         limiterNode = limiter
 
         avEngine.attach(source)
-        avEngine.attach(eq)
         avEngine.attach(limiter)
-        avEngine.connect(source, to: eq, format: format)
-        avEngine.connect(eq, to: limiter, format: format)
+        avEngine.connect(source, to: limiter, format: format)
         avEngine.connect(limiter, to: avEngine.outputNode, format: format)
 
         try avEngine.start()
@@ -445,8 +531,6 @@ final class AudioEngine: ObservableObject {
         // IOProc: write tap audio into ring buffer; silence aggregate output
         // (playback is done by AVAudioEngine on the real device).
         let ioBlock: AudioDeviceIOBlock = { _, inInputData, _, outOutputData, _ in
-            guard let ringBuf = rtRingBuffer else { return }
-
             let inList = UnsafeMutableAudioBufferListPointer(
                 UnsafeMutablePointer(mutating: inInputData)
             )
@@ -454,7 +538,7 @@ final class AudioEngine: ObservableObject {
                 guard let data = inList[i].mData else { continue }
                 let sampleCount = Int(inList[i].mDataByteSize) / MemoryLayout<Float>.size
                 let samples = data.assumingMemoryBound(to: Float.self)
-                ringBuf.write(samples, count: sampleCount)
+                ring.write(samples, count: sampleCount)
                 analyzer?.submitInterleaved(samples, count: sampleCount)
             }
 
@@ -476,6 +560,7 @@ final class AudioEngine: ObservableObject {
         )
 
         isRunning = true
+        startLatencyUpdates()
         analyzer?.start()
         // Real proof that system-audio capture is allowed (preflight can lie).
         PermissionMonitor.shared.markEngineSucceeded()
@@ -483,6 +568,8 @@ final class AudioEngine: ObservableObject {
     }
 
     func stop() {
+        startupTask?.cancel()
+        startupTask = nil
         restartGeneration &+= 1
         restartWorkItem?.cancel()
         restartWorkItem = nil
@@ -498,6 +585,9 @@ final class AudioEngine: ObservableObject {
             return
         }
         isRunning = false
+        latencyTimer?.invalidate()
+        latencyTimer = nil
+        measuredLatencyMilliseconds = 0
 
         if let procID {
             AudioDeviceStop(aggregateDeviceID, procID)
@@ -506,8 +596,6 @@ final class AudioEngine: ObservableObject {
         }
 
         engine?.stop()
-        rtRingBuffer = nil
-        rtStereoProcessor = nil
 
         spectrumAnalyzer?.stop()
         spectrumAnalyzer = nil
@@ -516,17 +604,13 @@ final class AudioEngine: ObservableObject {
             count: SpectrumAnalyzer.binCount
         )
         stereoProcessor = nil
+        biquadProcessor = nil
         ringBuffer = nil
 
-        let oldScratch = rtScratchBuffer
-        rtScratchBuffer = nil
-        rtScratchCapacity = 0
-        oldScratch?.deallocate()
-
         engine = nil
-        eqNode = nil
         limiterNode = nil
         sourceNode = nil
+        renderContext = nil
 
         if aggregateDeviceID != kAudioObjectUnknown {
             AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
@@ -545,39 +629,70 @@ final class AudioEngine: ObservableObject {
     // MARK: - EQ application
 
     private func applyEQ() {
-        if let eq = eqNode {
-            configureEQBands(eq, with: activePreset)
-            eq.globalGain = max(-24, min(6, activePreset.preampDB))
-            eq.bypass = bypassed || activePreset.isFlat
-        }
-        limiterNode?.bypass = bypassed
+        biquadProcessor?.update(
+            bands: activePreset.bands,
+            preampDB: activePreset.preampDB,
+            bypassed: bypassed
+        )
+        // Keep protection active on both sides of A/B. The bypass path still
+        // applies the preset preamp, so wet and dry are level matched.
+        limiterNode?.bypass = false
     }
 
     private func updateStereoProcessorSettings() {
         stereoProcessor?.update(
             settings: StereoProcessor.Settings(
                 crossfeedIntensity: crossfeedIntensity,
-                stereoWidth: stereoWidth,
-                balance: balance,
-                monoEnabled: monoEnabled,
                 bypassed: bypassed
             )
         )
     }
 
-    private func configureEQBands(_ eq: AVAudioUnitEQ, with preset: EQPreset) {
-        let bands = preset.bands
-        for i in 0..<eq.bands.count {
-            let slot = eq.bands[i]
-            if i < bands.count {
-                let band = bands[i]
-                slot.filterType = band.filterType.avType
-                slot.frequency = max(20, min(20_000, band.frequency))
-                slot.bandwidth = max(0.05, min(5.0, band.bandwidth))
-                slot.gain = max(-24, min(24, band.gain))
-                slot.bypass = !band.enabled
-            } else {
-                slot.bypass = true
+    private func waitUntilDeviceIsAlive(_ deviceID: AudioDeviceID) async throws {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsAlive,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        for _ in 0..<30 {
+            try Task.checkCancellation()
+            var alive: UInt32 = 0
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            try caCheck(
+                AudioObjectGetPropertyData(
+                    deviceID,
+                    &address,
+                    0,
+                    nil,
+                    &size,
+                    &alive
+                ),
+                "Failed to query aggregate-device readiness"
+            )
+            if alive != 0 { return }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        throw AudioError.message("Timed out waiting for the aggregate audio device")
+    }
+
+    private func startLatencyUpdates() {
+        latencyTimer?.invalidate()
+        latencyTimer = Timer.scheduledTimer(
+            withTimeInterval: 0.25,
+            repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self,
+                      let ringBuffer = self.ringBuffer,
+                      self.sampleRate > 0
+                else { return }
+                let queuedFrames =
+                    Double(ringBuffer.availableSamples)
+                    / Double(max(1, self.activeChannelCount))
+                // The Apple peak limiter contributes its configured 7 ms
+                // look-ahead in addition to the queue.
+                self.measuredLatencyMilliseconds =
+                    queuedFrames / self.sampleRate * 1_000 + 7
             }
         }
     }
@@ -700,7 +815,29 @@ final class AudioEngine: ObservableObject {
 
     private func handleOutputFormatChange() {
         guard isRunning else { return }
-        // Debounce bursts of nominal-rate and stream-format notifications.
+        // Stream-format notifications frequently repeat without changing the
+        // rate that defines this graph. Ignore those instead of rebuilding the
+        // tap and aggregate device.
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var rate: Float64 = 0
+        var size = UInt32(MemoryLayout<Float64>.size)
+        let status = AudioObjectGetPropertyData(
+            observedOutputDeviceID,
+            &address,
+            0,
+            nil,
+            &size,
+            &rate
+        )
+        guard status == noErr, rate > 0, abs(rate - sampleRate) >= 1 else {
+            return
+        }
+        // AVAudioSourceNode's format is immutable, so a genuine rate change
+        // still requires a debounced graph rebuild.
         scheduleRestart(reconnectDelay: 0.12)
     }
 

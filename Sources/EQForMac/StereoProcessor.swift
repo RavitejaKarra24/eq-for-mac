@@ -10,23 +10,16 @@ import Foundation
 final class StereoProcessor: @unchecked Sendable {
     struct Settings: Sendable {
         var crossfeedIntensity: Float
-        var stereoWidth: Float
-        var balance: Float
-        var monoEnabled: Bool
         var bypassed: Bool
 
         static let neutral = Settings(
             crossfeedIntensity: 0,
-            stereoWidth: 1,
-            balance: 0,
-            monoEnabled: false,
             bypassed: false
         )
     }
 
-    private static let valueBits: UInt64 = 20
+    private static let valueBits: UInt64 = 32
     private static let valueMask: UInt64 = (1 << valueBits) - 1
-    private static let monoBit: UInt64 = 1 << 60
     private static let bypassBit: UInt64 = 1 << 61
 
     private var packedSettings: Int64
@@ -82,7 +75,7 @@ final class StereoProcessor: @unchecked Sendable {
         atomicStore(command, in: &packedFadeCommand)
     }
 
-    /// Applies crossfeed/width/balance/mono plus restart gain smoothing.
+    /// Applies crossfeed plus restart gain smoothing.
     /// The buffers are AVAudioEngine's non-interleaved Float32 output buffers.
     @inline(__always)
     func process(
@@ -119,9 +112,6 @@ final class StereoProcessor: @unchecked Sendable {
 
         let controlsAreNeutral =
             settings.crossfeedIntensity < 0.000_01
-            && abs(settings.stereoWidth - 1) < 0.000_01
-            && abs(settings.balance) < 0.000_01
-            && !settings.monoEnabled
         if controlsAreNeutral {
             if !controlsWereNeutral {
                 resetCrossfeedState()
@@ -149,9 +139,6 @@ final class StereoProcessor: @unchecked Sendable {
 
         let crossfeedMix = settings.crossfeedIntensity * 0.22
         let dryScale = 1 / (1 + crossfeedMix)
-        let width = settings.monoEnabled ? Float(0) : settings.stereoWidth
-        let leftBalanceGain = settings.balance > 0 ? 1 - settings.balance : 1
-        let rightBalanceGain = settings.balance < 0 ? 1 + settings.balance : 1
 
         for frame in 0..<frameCount {
             let dryLeft = left[frame]
@@ -173,12 +160,10 @@ final class StereoProcessor: @unchecked Sendable {
                 (dryLeft + delayedRight * crossfeedMix) * dryScale
             let crossfedRight =
                 (dryRight + delayedLeft * crossfeedMix) * dryScale
-            let mid = (crossfedLeft + crossfedRight) * 0.5
-            let side = (crossfedLeft - crossfedRight) * 0.5 * width
             let gain = nextGain()
 
-            left[frame] = (mid + side) * leftBalanceGain * gain
-            right[frame] = (mid - side) * rightBalanceGain * gain
+            left[frame] = crossfedLeft * gain
+            right[frame] = crossfedRight * gain
 
             if bufferList.count > 2, gain != 1 {
                 for channel in 2..<bufferList.count {
@@ -200,6 +185,9 @@ final class StereoProcessor: @unchecked Sendable {
         left: UnsafeMutablePointer<Float>?,
         right: UnsafeMutablePointer<Float>?
     ) {
+        if remainingRampFrames == 0 && abs(currentGain - 1) < 0.000_001 {
+            return
+        }
         for frame in 0..<frameCount {
             let gain = nextGain()
             guard gain != 1 else { continue }
@@ -274,15 +262,7 @@ final class StereoProcessor: @unchecked Sendable {
 
     private static func pack(_ settings: Settings) -> UInt64 {
         let crossfeed = quantize(settings.crossfeedIntensity, lower: 0, upper: 1)
-        let width = quantize(settings.stereoWidth, lower: 0, upper: 2)
-        let balance = quantize(settings.balance, lower: -1, upper: 1)
-        var result =
-            crossfeed
-            | (width << valueBits)
-            | (balance << (valueBits * 2))
-        if settings.monoEnabled {
-            result |= monoBit
-        }
+        var result = crossfeed
         if settings.bypassed {
             result |= bypassBit
         }
@@ -291,17 +271,12 @@ final class StereoProcessor: @unchecked Sendable {
 
     private static func unpack(_ packed: UInt64) -> Settings {
         let crossfeedBits = packed & valueMask
-        let widthBits = (packed >> valueBits) & valueMask
-        let balanceBits = (packed >> (valueBits * 2)) & valueMask
         return Settings(
             crossfeedIntensity: dequantize(
                 crossfeedBits,
                 lower: 0,
                 upper: 1
             ),
-            stereoWidth: dequantize(widthBits, lower: 0, upper: 2),
-            balance: dequantize(balanceBits, lower: -1, upper: 1),
-            monoEnabled: packed & monoBit != 0,
             bypassed: packed & bypassBit != 0
         )
     }

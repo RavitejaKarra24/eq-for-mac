@@ -49,6 +49,10 @@ final class AudioRingBuffer: @unchecked Sendable {
         capacity
     }
 
+    var availableSamples: Int {
+        availableToRead(write: loadWriteHead(), read: loadReadHead())
+    }
+
     private func loadWriteHead() -> Int64 {
         OSAtomicAdd64Barrier(0, &writeHead)
     }
@@ -146,6 +150,17 @@ final class AudioRingBuffer: @unchecked Sendable {
             OSAtomicAdd64Barrier(Int64(skipped), &readHead)
         }
         return read(dest, count: min(count, available))
+    }
+
+    /// Drops queued history while retaining a caller-selected latency target.
+    func trimBacklog(keepingAtMost count: Int) {
+        let read = loadReadHead()
+        let write = loadWriteHead()
+        let available = availableToRead(write: write, read: read)
+        let staleCount = max(0, available - max(0, count))
+        if staleCount > 0 {
+            OSAtomicAdd64Barrier(Int64(staleCount), &readHead)
+        }
     }
 
     private func requestConsumerResyncIfNeeded() {

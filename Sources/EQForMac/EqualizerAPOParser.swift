@@ -84,7 +84,7 @@ enum EqualizerAPOParser {
             guard let freq = frequency, let typeTok = typeToken else { continue }
 
             let filterType = EQFilterType.fromAPO(typeTok)
-            let bandwidth = octaveBandwidth.map { max(0.05, min(5, $0)) }
+            let bandwidth = octaveBandwidth.map { max(0.000_001, abs($0)) }
                 ?? EQBand.bandwidthFromQ(q)
 
             bands.append(

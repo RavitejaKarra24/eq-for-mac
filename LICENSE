@@ -1,0 +1,14 @@
+EQ for Mac source notice
+
+The application source code in this repository is free to use, modify, and
+share for personal and community projects.
+
+No additional rights are granted here for the bundled headphone measurements,
+frequency-response data, or derived EQ curves. Those assets retain the credits
+and redistribution terms of their respective AutoEq, Squiglink, PEQdB, and
+other measurement sources. Review the source metadata and upstream project
+terms before redistributing those assets.
+
+The software and data are provided as-is, without warranty of any kind. The
+authors and contributors are not liable for claims, damages, or other
+liability arising from their use.

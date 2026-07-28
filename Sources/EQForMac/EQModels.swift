@@ -1,4 +1,3 @@
-import AVFAudio
 import Foundation
 
 // MARK: - Filter types
@@ -12,15 +11,15 @@ enum EQFilterType: String, Codable, CaseIterable, Sendable {
     case bandPass
     case notch
 
-    var avType: AVAudioUnitEQFilterType {
+    var displayName: String {
         switch self {
-        case .parametric: return .parametric
-        case .lowShelf: return .lowShelf
-        case .highShelf: return .highShelf
-        case .lowPass: return .lowPass
-        case .highPass: return .highPass
-        case .bandPass: return .bandPass
-        case .notch: return .bandStop
+        case .parametric: return "Peak"
+        case .lowShelf: return "Low shelf"
+        case .highShelf: return "High shelf"
+        case .lowPass: return "Low pass"
+        case .highPass: return "High pass"
+        case .bandPass: return "Band pass"
+        case .notch: return "Notch"
         }
     }
 
@@ -47,7 +46,7 @@ struct EQBand: Codable, Equatable, Identifiable, Sendable {
     var frequency: Float
     /// Gain in dB (−24…+24)
     var gain: Float
-    /// Bandwidth in octaves for AVAudioUnitEQ (≈ 1.0 → Q ≈ 1.41)
+    /// Full bandwidth in octaves for the owned RBJ biquad renderer.
     var bandwidth: Float
     var enabled: Bool
     /// True for a non-destructive graphic/curve edit layered over an imported
@@ -115,12 +114,22 @@ struct EQBand: Codable, Equatable, Identifiable, Sendable {
         try container.encode(isUserOverlay, forKey: .isUserOverlay)
     }
 
-    /// Convert Q factor to approximate octave bandwidth used by AVAudioUnitEQ.
+    /// Whether this band changes the rendered frequency response.
+    var changesFrequencyResponse: Bool {
+        guard enabled else { return false }
+        switch filterType {
+        case .parametric, .lowShelf, .highShelf:
+            return abs(gain) >= 0.000_01
+        case .lowPass, .highPass, .bandPass, .notch:
+            return true
+        }
+    }
+
+    /// Convert Q factor to octave bandwidth without widening high-Q filters.
     static func bandwidthFromQ(_ q: Float) -> Float {
-        // BW (octaves) ≈ 2 / ln(2) * asinh(1/(2Q))  — common practical mapping
-        let qClamped = max(0.05, q)
+        let qClamped = max(0.000_001, abs(q))
         let value = (2.0 / log(2.0)) * asinh(1.0 / (2.0 * Double(qClamped)))
-        return Float(max(0.05, min(5.0, value)))
+        return Float(value)
     }
 }
 
@@ -237,16 +246,12 @@ struct EQPreset: Codable, Identifiable, Equatable, Sendable {
         try container.encodeIfPresent(source, forKey: .source)
     }
 
+    var changesFrequencyResponse: Bool {
+        bands.contains(where: \.changesFrequencyResponse)
+    }
+
     var isFlat: Bool {
-        abs(preampDB) < 0.01 && bands.allSatisfy { band in
-            guard band.enabled else { return true }
-            switch band.filterType {
-            case .parametric, .lowShelf, .highShelf:
-                return abs(band.gain) < 0.01
-            case .lowPass, .highPass, .bandPass, .notch:
-                return false
-            }
-        }
+        abs(preampDB) < 0.01 && !changesFrequencyResponse
     }
 
     static func flat(mode: EQBandMode = .ten) -> EQPreset {
@@ -282,14 +287,9 @@ struct EQPreset: Codable, Identifiable, Equatable, Sendable {
         return [
             .flat(mode: m10),
             .graphic(name: "Bass Boost", mode: m10, gains: [6, 5, 3, 1, 0, 0, 0, 0, 0, 0], preamp: -4),
-            .graphic(name: "Treble Boost", mode: m10, gains: [0, 0, 0, 0, 0, 0, 1, 3, 5, 6], preamp: -4),
-            .graphic(name: "V-Shape", mode: m10, gains: [5, 3, 1, -1, -2, -2, -1, 1, 3, 5], preamp: -4),
             .graphic(name: "Vocal", mode: m10, gains: [-2, -1, 0, 2, 4, 4, 3, 1, 0, -1], preamp: -3),
             .graphic(name: "Podcast", mode: m10, gains: [-4, -2, 0, 2, 4, 5, 4, 2, 0, -2], preamp: -3),
             .graphic(name: "Loudness", mode: m10, gains: [5, 3, 1, 0, -1, -1, 0, 1, 3, 4], preamp: -4),
-            .graphic(name: "Rock", mode: m10, gains: [4, 3, 1, 0, -1, 0, 2, 3, 3, 2], preamp: -3),
-            .graphic(name: "Electronic", mode: m10, gains: [5, 4, 2, 0, -1, 0, 1, 2, 4, 5], preamp: -4),
-            .graphic(name: "Classical", mode: m10, gains: [0, 0, 0, 0, 0, 0, -1, -1, -1, -1], preamp: 0),
         ]
     }()
 }
@@ -480,9 +480,6 @@ struct AppPreferences: Codable, Equatable, Sendable {
     var hotKeyModifiers: UInt32
     var crossfeedEnabled: Bool
     var crossfeedAmount: Float
-    var stereoWidth: Float
-    var balance: Float
-    var monoEnabled: Bool
 
     var favoritePresetIDs: [UUID]
     var favoriteHeadphoneNames: [String]
@@ -510,9 +507,6 @@ struct AppPreferences: Codable, Equatable, Sendable {
         hotKeyModifiers: UInt32 = 0,
         crossfeedEnabled: Bool = false,
         crossfeedAmount: Float = 0.25,
-        stereoWidth: Float = 1,
-        balance: Float = 0,
-        monoEnabled: Bool = false,
         favoritePresetIDs: [UUID] = [],
         favoriteHeadphoneNames: [String] = [],
         recentHeadphoneNames: [String] = [],
@@ -536,9 +530,6 @@ struct AppPreferences: Codable, Equatable, Sendable {
         self.hotKeyModifiers = hotKeyModifiers
         self.crossfeedEnabled = crossfeedEnabled
         self.crossfeedAmount = crossfeedAmount
-        self.stereoWidth = stereoWidth
-        self.balance = balance
-        self.monoEnabled = monoEnabled
         self.favoritePresetIDs = favoritePresetIDs
         self.favoriteHeadphoneNames = favoriteHeadphoneNames
         self.recentHeadphoneNames = recentHeadphoneNames
@@ -564,9 +555,6 @@ struct AppPreferences: Codable, Equatable, Sendable {
         case hotKeyModifiers
         case crossfeedEnabled
         case crossfeedAmount
-        case stereoWidth
-        case balance
-        case monoEnabled
         case favoritePresetIDs
         case favoriteHeadphoneNames
         case recentHeadphoneNames
@@ -604,9 +592,6 @@ struct AppPreferences: Codable, Equatable, Sendable {
             ?? false
         crossfeedAmount = try container.decodeIfPresent(Float.self, forKey: .crossfeedAmount)
             ?? 0.25
-        stereoWidth = try container.decodeIfPresent(Float.self, forKey: .stereoWidth) ?? 1
-        balance = try container.decodeIfPresent(Float.self, forKey: .balance) ?? 0
-        monoEnabled = try container.decodeIfPresent(Bool.self, forKey: .monoEnabled) ?? false
         favoritePresetIDs = try container.decodeIfPresent([UUID].self, forKey: .favoritePresetIDs)
             ?? []
         favoriteHeadphoneNames = try container.decodeIfPresent(
@@ -646,9 +631,6 @@ struct AppPreferences: Codable, Equatable, Sendable {
         try container.encode(hotKeyModifiers, forKey: .hotKeyModifiers)
         try container.encode(crossfeedEnabled, forKey: .crossfeedEnabled)
         try container.encode(crossfeedAmount, forKey: .crossfeedAmount)
-        try container.encode(stereoWidth, forKey: .stereoWidth)
-        try container.encode(balance, forKey: .balance)
-        try container.encode(monoEnabled, forKey: .monoEnabled)
         try container.encode(favoritePresetIDs, forKey: .favoritePresetIDs)
         try container.encode(favoriteHeadphoneNames, forKey: .favoriteHeadphoneNames)
         try container.encode(recentHeadphoneNames, forKey: .recentHeadphoneNames)

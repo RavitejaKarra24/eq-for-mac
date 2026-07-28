@@ -76,8 +76,8 @@ final class HotKeyManager {
         }
     }
 
-    private var eventHandlerRef: EventHandlerRef?
-    private var hotKeyRef: EventHotKeyRef?
+    nonisolated(unsafe) private var eventHandlerRef: EventHandlerRef?
+    nonisolated(unsafe) private var hotKeyRef: EventHotKeyRef?
     private var onPressed: (@MainActor () -> Void)?
 
     private(set) var registeredShortcut: Shortcut?

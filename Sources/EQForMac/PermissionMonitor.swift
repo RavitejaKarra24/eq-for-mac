@@ -20,7 +20,6 @@ final class PermissionMonitor: ObservableObject {
 
     private let dismissedKey = "EQForMac.permissionBannerDismissed"
     private var engineSucceededThisSession = false
-    private var observers: [NSObjectProtocol] = []
 
     private init() {
         // Migrate away from the old durable success bit. Permission can be
@@ -29,12 +28,6 @@ final class PermissionMonitor: ObservableObject {
         UserDefaults.standard.removeObject(forKey: "EQForMac.audioPermissionOK")
         refresh()
         installObservers()
-    }
-
-    deinit {
-        for obs in observers {
-            NotificationCenter.default.removeObserver(obs)
-        }
     }
 
     func refresh() {
@@ -107,24 +100,20 @@ final class PermissionMonitor: ObservableObject {
 
     private func installObservers() {
         let center = NotificationCenter.default
-        observers.append(
-            center.addObserver(
+        _ = center.addObserver(
                 forName: NSApplication.didBecomeActiveNotification,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor in self?.refresh() }
             }
-        )
-        observers.append(
-            center.addObserver(
+        _ = center.addObserver(
                 forName: NSWorkspace.didWakeNotification,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor in self?.refresh() }
             }
-        )
     }
 
     /// Non-destructive probe: create an *unmuted* global tap and destroy it.

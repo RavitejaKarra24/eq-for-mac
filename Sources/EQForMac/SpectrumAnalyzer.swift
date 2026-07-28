@@ -11,6 +11,14 @@ final class SpectrumAnalyzer: @unchecked Sendable {
     static let minimumFrequency: Float = 20
     static let maximumFrequency: Float = 20_000
 
+    static func smoothingCoefficient(
+        frameInterval: Float,
+        timeConstant: Float
+    ) -> Float {
+        guard frameInterval > 0, timeConstant > 0 else { return 1 }
+        return 1 - exp(-frameInterval / timeConstant)
+    }
+
     private let channelCount: Int
     private let fftSize: Int
     private let log2FFTSize: vDSP_Length
@@ -38,7 +46,6 @@ final class SpectrumAnalyzer: @unchecked Sendable {
     private var splitImaginary: [Float]
     private var channelPowerSpectrum: [Float]
     private var powerSpectrum: [Float]
-    private var decibelSpectrum: [Float]
     private var smoothedMagnitudes: [Float]
 
     init?(
@@ -87,7 +94,6 @@ final class SpectrumAnalyzer: @unchecked Sendable {
         splitImaginary = Array(repeating: 0, count: fftSize / 2)
         channelPowerSpectrum = Array(repeating: 0, count: fftSize / 2)
         powerSpectrum = Array(repeating: 0, count: fftSize / 2)
-        decibelSpectrum = Array(repeating: -90, count: fftSize / 2)
         smoothedMagnitudes = Array(repeating: 0, count: Self.binCount)
 
         vDSP_hann_window(
@@ -336,35 +342,35 @@ final class SpectrumAnalyzer: @unchecked Sendable {
             1,
             vDSP_Length(powerSpectrum.count)
         )
-        var referencePower: Float = 1
-        vDSP_vdbcon(
-            powerSpectrum,
-            1,
-            &referencePower,
-            &decibelSpectrum,
-            1,
-            vDSP_Length(decibelSpectrum.count),
-            0
-        )
     }
 
     private func publishLogBins() {
         let noiseFloor: Float = -90
         let displayRange = -noiseFloor
+        let frameInterval: Float = 0.033
+        let attack = Self.smoothingCoefficient(
+            frameInterval: frameInterval,
+            timeConstant: 0.050
+        )
+        let release = Self.smoothingCoefficient(
+            frameInterval: frameInterval,
+            timeConstant: 0.300
+        )
 
-        decibelSpectrum.withUnsafeBufferPointer { decibels in
-            guard let baseAddress = decibels.baseAddress else { return }
+        powerSpectrum.withUnsafeBufferPointer { powers in
+            guard let baseAddress = powers.baseAddress else { return }
             for (index, range) in binRanges.enumerated() {
-                var peak = noiseFloor
-                vDSP_maxv(
+                var meanPower: Float = 0
+                vDSP_meanv(
                     baseAddress.advanced(by: range.lowerBound),
                     1,
-                    &peak,
+                    &meanPower,
                     vDSP_Length(range.count)
                 )
-                let target = max(0, min(1, (peak - noiseFloor) / displayRange))
-                let smoothing: Float =
-                    target > smoothedMagnitudes[index] ? 0.45 : 0.12
+                let rmsDB = 10 * log10(max(0.000_000_001, meanPower))
+                let target = max(0, min(1, (rmsDB - noiseFloor) / displayRange))
+                let smoothing =
+                    target > smoothedMagnitudes[index] ? attack : release
                 smoothedMagnitudes[index] +=
                     (target - smoothedMagnitudes[index]) * smoothing
             }

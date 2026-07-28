@@ -1,5 +1,55 @@
 import SwiftUI
 
+enum EQCurveGeometry {
+    static let minimumFrequency: Float = 20
+    static let maximumFrequency: Float = 20_000
+
+    static func frequency(atX x: CGFloat, in plot: CGRect) -> Float {
+        guard plot.width > 0 else { return 1_000 }
+        let fraction = min(1, max(0, (x - plot.minX) / plot.width))
+        let logarithm =
+            log10(Double(minimumFrequency))
+            + Double(fraction)
+                * (log10(Double(maximumFrequency)) - log10(Double(minimumFrequency)))
+        return Float(pow(10, logarithm))
+    }
+
+    static func x(for frequency: Float, in plot: CGRect) -> CGFloat {
+        let clamped = min(maximumFrequency, max(minimumFrequency, frequency))
+        let normalized =
+            (log10(Double(clamped)) - log10(Double(minimumFrequency)))
+            / (log10(Double(maximumFrequency)) - log10(Double(minimumFrequency)))
+        return plot.minX + CGFloat(normalized) * plot.width
+    }
+
+    static func gain(
+        atY y: CGFloat,
+        in plot: CGRect,
+        range: ClosedRange<Float>
+    ) -> Float {
+        guard plot.height > 0 else { return 0 }
+        let normalized = Float(1 - ((y - plot.minY) / plot.height))
+        return min(
+            range.upperBound,
+            max(
+                range.lowerBound,
+                range.lowerBound + normalized * (range.upperBound - range.lowerBound)
+            )
+        )
+    }
+
+    static func y(
+        for gain: Float,
+        in plot: CGRect,
+        range: ClosedRange<Float>
+    ) -> CGFloat {
+        let clamped = min(range.upperBound, max(range.lowerBound, gain))
+        let span = max(0.001, range.upperBound - range.lowerBound)
+        let normalized = CGFloat((clamped - range.lowerBound) / span)
+        return plot.maxY - normalized * plot.height
+    }
+}
+
 /// Interactive, log-frequency response editor.
 ///
 /// Spectrum magnitudes are expected to be normalized to `0...1` and log-spaced
@@ -9,11 +59,19 @@ import SwiftUI
 struct EQCurveView: View {
     var gains: [Float]
     var frequencies: [Float]
+    /// Dense samples of the exact biquad cascade response.
+    var responseGains: [Float] = []
+    var responseFrequencies: [Float] = []
     var spectrumMagnitudes: [Float] = []
     var range: ClosedRange<Float> = -12...12
     var isEditable = true
-    var onGainChange: (Int, Float) -> Void = { _, _ in }
+    var allowsParametricEditing = false
+    var onBandChange: (Int, Float, Float) -> Void = { _, _, _ in }
     var onResetBand: (Int) -> Void = { _ in }
+    var onAddBand: (Float, Float) -> Void = { _, _ in }
+    var onDeleteBand: (Int) -> Void = { _ in }
+    var onFilterTypeChange: (Int, EQFilterType) -> Void = { _, _ in }
+    var onBandwidthChange: (Int, Float) -> Void = { _, _ in }
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -28,7 +86,8 @@ struct EQCurveView: View {
         GeometryReader { geometry in
             let plot = plotRect(in: geometry.size)
             let points = bandPoints(in: plot)
-            let curve = curvePath(points: points)
+            let responsePoints = exactResponsePoints(in: plot)
+            let curve = curvePath(points: responsePoints.isEmpty ? points : responsePoints)
 
             ZStack {
                 grid(in: plot)
@@ -91,6 +150,7 @@ struct EQCurveView: View {
             .contentShape(Rectangle())
             .gesture(dragGesture(in: plot))
             .simultaneousGesture(resetGesture(in: plot))
+            .simultaneousGesture(addGesture(in: plot))
             .onContinuousHover { phase in
                 switch phase {
                 case .active(let location):
@@ -151,7 +211,7 @@ struct EQCurveView: View {
         let isHovered = hoveredBand == index
         return ZStack {
             Circle()
-                .fill(Color(nsColor: .windowBackgroundColor))
+                .fill(Color.black)
                 .frame(width: isHovered ? 13 : 10, height: isHovered ? 13 : 10)
             Circle()
                 .strokeBorder(Color.accentColor, lineWidth: isHovered ? 2.5 : 2)
@@ -165,7 +225,37 @@ struct EQCurveView: View {
         .accessibilityAdjustableAction { direction in
             guard isEditable else { return }
             let delta: Float = direction == .increment ? 0.5 : -0.5
-            onGainChange(index, snapped(gain(at: index) + delta))
+            onBandChange(
+                index,
+                frequency(at: index),
+                snapped(gain(at: index) + delta)
+            )
+        }
+        .contextMenu {
+            if allowsParametricEditing {
+                Menu("Filter type") {
+                    ForEach(EQFilterType.allCases, id: \.self) { type in
+                        Button(type.displayName) {
+                            onFilterTypeChange(index, type)
+                        }
+                    }
+                }
+                Menu("Bandwidth") {
+                    Button("Narrow · 0.25 oct") {
+                        onBandwidthChange(index, 0.25)
+                    }
+                    Button("Medium · 1 oct") {
+                        onBandwidthChange(index, 1)
+                    }
+                    Button("Wide · 2 oct") {
+                        onBandwidthChange(index, 2)
+                    }
+                }
+                Divider()
+                Button("Delete filter", role: .destructive) {
+                    onDeleteBand(index)
+                }
+            }
         }
     }
 
@@ -200,7 +290,14 @@ struct EQCurveView: View {
                 guard let index else { return }
                 draggedBand = index
                 hoveredBand = index
-                onGainChange(index, gainValue(at: value.location.y, in: plot))
+                let frequency = allowsParametricEditing
+                    ? frequencyValue(at: value.location.x, in: plot)
+                    : self.frequency(at: index)
+                onBandChange(
+                    index,
+                    frequency,
+                    gainValue(at: value.location.y, in: plot)
+                )
             }
             .onEnded { _ in
                 draggedBand = nil
@@ -218,6 +315,25 @@ struct EQCurveView: View {
             }
     }
 
+    private func addGesture(in plot: CGRect) -> some Gesture {
+        SpatialTapGesture()
+            .onEnded { value in
+                guard isEditable,
+                      allowsParametricEditing,
+                      plot.contains(value.location)
+                else { return }
+                let points = bandPoints(in: plot)
+                let isOnExistingNode = points.contains {
+                    hypot($0.x - value.location.x, $0.y - value.location.y) < 16
+                }
+                guard !isOnExistingNode else { return }
+                onAddBand(
+                    frequencyValue(at: value.location.x, in: plot),
+                    gainValue(at: value.location.y, in: plot)
+                )
+            }
+    }
+
     private func nearestBand(to location: CGPoint, in plot: CGRect) -> Int? {
         guard !gains.isEmpty, !frequencies.isEmpty else { return nil }
         let points = bandPoints(in: plot)
@@ -227,11 +343,13 @@ struct EQCurveView: View {
     }
 
     private func gainValue(at y: CGFloat, in plot: CGRect) -> Float {
-        guard plot.height > 0 else { return 0 }
-        let normalized = Float(1 - ((y - plot.minY) / plot.height))
-        let raw = range.lowerBound + normalized * (range.upperBound - range.lowerBound)
+        let raw = EQCurveGeometry.gain(atY: y, in: plot, range: range)
         let stepped = (raw * 2).rounded() / 2
         return snapped(min(range.upperBound, max(range.lowerBound, stepped)))
+    }
+
+    private func frequencyValue(at x: CGFloat, in plot: CGRect) -> Float {
+        EQCurveGeometry.frequency(atX: x, in: plot)
     }
 
     private func snapped(_ gain: Float) -> Float {
@@ -260,17 +378,23 @@ struct EQCurveView: View {
         }
     }
 
+    private func exactResponsePoints(in plot: CGRect) -> [CGPoint] {
+        let count = min(responseGains.count, responseFrequencies.count)
+        guard count > 1 else { return [] }
+        return (0..<count).map { index in
+            CGPoint(
+                x: xPosition(for: responseFrequencies[index], in: plot),
+                y: yPosition(for: responseGains[index], in: plot)
+            )
+        }
+    }
+
     private func xPosition(for frequency: Float, in plot: CGRect) -> CGFloat {
-        let clamped = min(Float(20_000), max(Float(20), frequency))
-        let normalized = (log10(Double(clamped)) - log10(20)) / (log10(20_000) - log10(20))
-        return plot.minX + CGFloat(normalized) * plot.width
+        EQCurveGeometry.x(for: frequency, in: plot)
     }
 
     private func yPosition(for gain: Float, in plot: CGRect) -> CGFloat {
-        let clamped = min(range.upperBound, max(range.lowerBound, gain))
-        let span = max(0.001, range.upperBound - range.lowerBound)
-        let normalized = CGFloat((clamped - range.lowerBound) / span)
-        return plot.maxY - normalized * plot.height
+        EQCurveGeometry.y(for: gain, in: plot, range: range)
     }
 
     private func curvePath(points: [CGPoint]) -> Path {
@@ -298,7 +422,7 @@ struct EQCurveView: View {
     }
 
     private func fillPath(from curve: Path, in plot: CGRect) -> Path {
-        guard !gains.isEmpty else { return Path() }
+        guard !gains.isEmpty || !responseGains.isEmpty else { return Path() }
         var fill = curve
         fill.addLine(to: CGPoint(x: plot.maxX, y: plot.maxY))
         fill.addLine(to: CGPoint(x: plot.minX, y: plot.maxY))

@@ -11,6 +11,9 @@ final class EQViewModel: ObservableObject {
     @Published var eqEnabled = false {
         didSet {
             guard !isRestoring else { return }
+            if !eqEnabled {
+                endDryComparison()
+            }
             audioEngine.setEnabled(eqEnabled)
             if eqEnabled, audioEngine.isRunning {
                 permission.markEngineSucceeded()
@@ -24,23 +27,8 @@ final class EQViewModel: ObservableObject {
         }
     }
 
-    @Published var bandMode: EQBandMode = .ten {
-        didSet {
-            guard !isRestoring, !isApplyingPreset else { return }
-            isApplyingPreset = true
-            rebuildGraphicDisplay(from: oldValue)
-            if activeParametricBands == nil {
-                selectedPresetName = gains.allSatisfy { abs($0) < 0.01 }
-                    && abs(preampDB) < 0.01
-                    ? "Flat"
-                    : "Custom"
-                selectedUserPresetID = nil
-                selectedHeadphoneName = nil
-            }
-            isApplyingPreset = false
-            finishFilterMutation()
-        }
-    }
+    /// One stable 10-band overview; imported presets remain fully parametric.
+    let bandMode: EQBandMode = .ten
 
     /// Graphic-band display values. A parametric preset remains stored in full;
     /// these values are only its projection onto the selected ISO centers.
@@ -55,9 +43,6 @@ final class EQViewModel: ObservableObject {
     @Published private(set) var hotKeyEnabled = false
     @Published private(set) var crossfeedEnabled = false
     @Published private(set) var crossfeedAmount: Float = 0.25
-    @Published private(set) var stereoWidth: Float = 1
-    @Published private(set) var balance: Float = 0
-    @Published private(set) var monoEnabled = false
     @Published private(set) var loginItemNotice: String?
     @Published var systemFeatureError: String?
 
@@ -90,7 +75,8 @@ final class EQViewModel: ObservableObject {
     private var bypassBeforeComparison = false
     private var lastOutputDeviceUID: String?
     private var lastHandledEngineError: String?
-    private var startupEQIntent = false
+    private var preferences = AppPreferences()
+    private var persistWorkItem: DispatchWorkItem?
 
     init(audioEngine: AudioEngine, presetStore: PresetStore) {
         self.audioEngine = audioEngine
@@ -98,7 +84,7 @@ final class EQViewModel: ObservableObject {
 
         restore()
         configureSystemFeatures()
-        applySpatialControls()
+        audioEngine.setCrossfeedIntensity(crossfeedEnabled ? crossfeedAmount : 0)
         pushToEngine()
         refreshCatalogResults()
         updateStatus()
@@ -129,14 +115,12 @@ final class EQViewModel: ObservableObject {
                 profile.preset,
                 headphoneName: profile.preset.isHeadphone ? profile.preset.name : nil
             )
-            startupEQIntent = profile.eqEnabled
+            eqEnabled = profile.eqEnabled
         }
         lastOutputDeviceUID = audioEngine.outputDeviceUID
 
-        if startupEQIntent {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                self?.eqEnabled = true
-            }
+        if eqEnabled {
+            audioEngine.setEnabled(true)
         }
 
         if permission.shouldShowBanner,
@@ -148,7 +132,36 @@ final class EQViewModel: ObservableObject {
     var frequencies: [Float] { bandMode.frequencies }
     var permissionHint: Bool { permission.shouldShowBanner }
     var hasParametricFilters: Bool { activeParametricBands != nil }
+    /// A level-matched dry comparison intentionally keeps the preamp, so only
+    /// filters and crossfeed can create an audible A/B difference.
+    var hasDryComparisonDifference: Bool {
+        currentPresetSnapshot().changesFrequencyResponse
+            || (crossfeedEnabled && crossfeedAmount >= 0.000_01)
+    }
+    var hasUserOverlays: Bool {
+        activeParametricBands?.contains(where: \.isUserOverlay) == true
+    }
     var spectrumMagnitudes: [Float] { audioEngine.spectrumMagnitudes }
+    var responseFrequencies: [Float] {
+        EQResponse.logarithmicFrequencies(count: 192)
+    }
+    var responseGains: [Float] {
+        let bands = currentPresetSnapshot().bands
+        return responseFrequencies.map {
+            EQResponse.magnitudeDB(bands: bands, at: Double($0))
+        }
+    }
+    var editorBands: [EQBand] {
+        activeParametricBands ?? zip(frequencies, gains).map {
+            EQBand(
+                frequency: $0.0,
+                gain: $0.1,
+                bandwidth: bandMode.defaultBandwidth
+            )
+        }
+    }
+    var editorGains: [Float] { editorBands.map(\.gain) }
+    var editorFrequencies: [Float] { editorBands.map(\.frequency) }
 
     var frequencyLabels: [String] {
         frequencies.map(Self.frequencyLabel)
@@ -166,7 +179,11 @@ final class EQViewModel: ObservableObject {
     }
 
     func toggleBypass() {
-        setBypassed(!isBypassed)
+        if isComparing {
+            endDryComparison()
+        } else {
+            setBypassed(!isBypassed)
+        }
     }
 
     func setBypassed(_ bypassed: Bool) {
@@ -178,7 +195,11 @@ final class EQViewModel: ObservableObject {
     }
 
     func beginDryComparison() {
-        guard !isComparing, eqEnabled else { return }
+        guard !isComparing,
+              eqEnabled,
+              !isBypassed,
+              hasDryComparisonDifference
+        else { return }
         bypassBeforeComparison = isBypassed
         isComparing = true
         setBypassed(true)
@@ -243,6 +264,87 @@ final class EQViewModel: ObservableObject {
         setGain(0, at: index)
     }
 
+    func setEditorBand(at index: Int, frequency: Float, gain: Float) {
+        guard var bands = activeParametricBands, bands.indices.contains(index) else {
+            setGain(gain, at: index)
+            return
+        }
+        bands[index].frequency = min(20_000, max(20, frequency))
+        bands[index].gain = min(24, max(-24, gain))
+        activeParametricBands = bands
+        markParametricEdit()
+    }
+
+    func addEditorBand(frequency: Float, gain: Float) {
+        guard var bands = activeParametricBands else { return }
+        bands.append(
+            EQBand(
+                frequency: min(20_000, max(20, frequency)),
+                gain: min(24, max(-24, gain)),
+                bandwidth: 1
+            )
+        )
+        activeParametricBands = bands
+        markParametricEdit()
+    }
+
+    func deleteEditorBand(at index: Int) {
+        guard var bands = activeParametricBands, bands.indices.contains(index) else {
+            return
+        }
+        bands.remove(at: index)
+        activeParametricBands = bands
+        markParametricEdit()
+    }
+
+    func setEditorBandType(_ type: EQFilterType, at index: Int) {
+        guard var bands = activeParametricBands, bands.indices.contains(index) else {
+            return
+        }
+        bands[index].filterType = type
+        activeParametricBands = bands
+        markParametricEdit()
+    }
+
+    func setEditorBandwidth(_ bandwidth: Float, at index: Int) {
+        guard var bands = activeParametricBands, bands.indices.contains(index) else {
+            return
+        }
+        bands[index].bandwidth = max(0.000_001, bandwidth)
+        activeParametricBands = bands
+        markParametricEdit()
+    }
+
+    func revertToSourceCurve() {
+        guard var bands = activeParametricBands else { return }
+        bands.removeAll(where: \.isUserOverlay)
+        activeParametricBands = bands
+        gains = Self.approximateGains(from: bands, mode: bandMode)
+        selectedPresetName = selectedHeadphoneName ?? selectedPresetName
+        finishFilterMutation()
+    }
+
+    func copyFiltersToPasteboard() {
+        let text = EqualizerAPOExporter.export(currentPresetSnapshot())
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        catalogNotice = "Copied \(currentPresetSnapshot().bands.filter(\.enabled).count) filters."
+    }
+
+    func flushPreferences() {
+        persistWorkItem?.cancel()
+        persistWorkItem = nil
+        preferences.save()
+    }
+
+    private func markParametricEdit() {
+        guard let bands = activeParametricBands else { return }
+        gains = Self.approximateGains(from: bands, mode: bandMode)
+        selectedPresetName = "Custom"
+        selectedUserPresetID = nil
+        finishFilterMutation()
+    }
+
     func setPreampDB(_ value: Float) {
         if autoPreampEnabled {
             autoPreampEnabled = false
@@ -296,8 +398,8 @@ final class EQViewModel: ObservableObject {
         if entry.isTargetCurve {
             headphoneLoadError = nil
             catalogNotice = """
-            \(entry.name) is a reference target, not a standalone EQ. Use it with \
-            a compatible headphone measurement in PEQdB Studio.
+            \(entry.name) is reference-target metadata, not a standalone EQ. \
+            Pair it with compatible measurement data before applying it.
             """
             statusText = "Reference target · \(entry.name)"
             return
@@ -328,21 +430,8 @@ final class EQViewModel: ObservableObject {
 
     // MARK: - Preset library
 
-    func saveCurrentPresetPrompt() {
-        let field = NSTextField(string: suggestedCustomPresetName())
-        field.placeholderString = "Preset name"
-        field.frame = NSRect(x: 0, y: 0, width: 260, height: 24)
-
-        let alert = NSAlert()
-        alert.messageText = "Save current EQ"
-        alert.informativeText = "Give this curve a name. You can rename or delete it later."
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { return }
+    @discardableResult
+    func saveCurrentPreset(named name: String) -> Bool {
         do {
             let saved = try presetStore.saveUserPreset(currentPresetSnapshot(), named: name)
             selectedPresetName = saved.name
@@ -350,23 +439,16 @@ final class EQViewModel: ObservableObject {
             selectedHeadphoneName = nil
             objectWillChange.send()
             persist()
+            systemFeatureError = nil
+            return true
         } catch {
-            presentAlert(title: "Couldn’t save preset", message: error.localizedDescription)
+            systemFeatureError = "Couldn’t save preset: \(error.localizedDescription)"
+            return false
         }
     }
 
-    func renameUserPresetPrompt(_ userPreset: UserPreset) {
-        let field = NSTextField(string: userPreset.name)
-        field.frame = NSRect(x: 0, y: 0, width: 260, height: 24)
-        let alert = NSAlert()
-        alert.messageText = "Rename preset"
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Rename")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { return }
+    @discardableResult
+    func renameUserPreset(_ userPreset: UserPreset, to name: String) -> Bool {
         do {
             let renamed = try presetStore.renameUserPreset(id: userPreset.id, to: name)
             if selectedUserPresetID == userPreset.id {
@@ -374,19 +456,15 @@ final class EQViewModel: ObservableObject {
             }
             objectWillChange.send()
             persist()
+            systemFeatureError = nil
+            return true
         } catch {
-            presentAlert(title: "Couldn’t rename preset", message: error.localizedDescription)
+            systemFeatureError = "Couldn’t rename preset: \(error.localizedDescription)"
+            return false
         }
     }
 
     func deleteUserPreset(_ userPreset: UserPreset) {
-        let alert = NSAlert()
-        alert.messageText = "Delete “\(userPreset.name)”?"
-        alert.informativeText = "Output-device profiles keep their own snapshot and won’t be affected."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Delete")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
         _ = presetStore.deleteUserPreset(id: userPreset.id)
         if selectedUserPresetID == userPreset.id {
             selectedPresetName = "Custom"
@@ -440,7 +518,7 @@ final class EQViewModel: ObservableObject {
             updateStatus()
         } catch {
             statusText = error.localizedDescription
-            presentAlert(title: "Import failed", message: error.localizedDescription)
+            headphoneLoadError = error.localizedDescription
         }
     }
 
@@ -553,24 +631,6 @@ final class EQViewModel: ObservableObject {
         persist()
     }
 
-    func setStereoWidth(_ width: Float) {
-        stereoWidth = min(2, max(0, width))
-        audioEngine.setStereoWidth(stereoWidth)
-        persist()
-    }
-
-    func setBalance(_ value: Float) {
-        balance = min(1, max(-1, value))
-        audioEngine.setBalance(balance)
-        persist()
-    }
-
-    func setMonoEnabled(_ enabled: Bool) {
-        monoEnabled = enabled
-        audioEngine.setMonoEnabled(enabled)
-        persist()
-    }
-
     // MARK: - Permission
 
     func requestPermissionIfNeeded() {
@@ -652,11 +712,16 @@ final class EQViewModel: ObservableObject {
             gains = Self.approximateGains(from: preset.bands, mode: bandMode)
         } else {
             activeParametricBands = nil
-            bandMode = preset.bandMode == .fifteen ? .fifteen : .ten
-            gains = normalizedGains(
-                preset.bands.map(\.gain),
-                count: bandMode.frequencies.count
-            )
+            gains = preset.bandMode == .fifteen
+                ? Self.resampleGraphicGains(
+                    preset.bands.map(\.gain),
+                    from: EQBandMode.fifteen.frequencies,
+                    to: frequencies
+                )
+                : normalizedGains(
+                    preset.bands.map(\.gain),
+                    count: frequencies.count
+                )
             graphicGainsByMode[bandMode] = gains
             preampDB = min(6, max(-24, preset.preampDB))
         }
@@ -699,21 +764,6 @@ final class EQViewModel: ObservableObject {
         }
     }
 
-    private func rebuildGraphicDisplay(from previousMode: EQBandMode) {
-        if let parametric = activeParametricBands {
-            gains = Self.approximateGains(from: parametric, mode: bandMode)
-        } else if let saved = graphicGainsByMode[bandMode] {
-            gains = normalizedGains(saved, count: bandMode.frequencies.count)
-        } else {
-            graphicGainsByMode[previousMode] = gains
-            gains = Self.resampleGraphicGains(
-                gains,
-                from: previousMode.frequencies,
-                to: bandMode.frequencies
-            )
-        }
-    }
-
     private func normalizedGains(_ values: [Float], count: Int) -> [Float] {
         if values.count == count { return values }
         if values.count < count {
@@ -722,29 +772,19 @@ final class EQViewModel: ObservableObject {
         return Array(values.prefix(count))
     }
 
-    /// Maps a parametric response onto graphic centers for display and editing.
-    /// Kept internal so the mapping can be regression-tested.
+    /// Samples the exact rendered response at the overview-band centers.
     static func approximateGains(from bands: [EQBand], mode: EQBandMode) -> [Float] {
         mode.frequencies.map { center in
-            var sum: Float = 0
-            for band in bands where band.enabled {
-                let octaveOffset = log2(center / max(20, band.frequency))
-                let influence: Float
-                switch band.filterType {
-                case .parametric, .bandPass, .notch:
-                    let width = max(0.1, band.bandwidth)
-                    let normalized = octaveOffset / width
-                    influence = exp(-0.693_147_2 * normalized * normalized)
-                case .lowShelf:
-                    influence = 1 / (1 + exp(6 * octaveOffset / max(0.1, band.bandwidth)))
-                case .highShelf:
-                    influence = 1 / (1 + exp(-6 * octaveOffset / max(0.1, band.bandwidth)))
-                case .lowPass, .highPass:
-                    influence = 0
-                }
-                sum += band.gain * influence
-            }
-            return max(-12, min(12, sum))
+            max(
+                -12,
+                min(
+                    12,
+                    EQResponse.magnitudeDB(
+                        bands: bands,
+                        at: Double(center)
+                    )
+                )
+            )
         }
     }
 
@@ -784,21 +824,23 @@ final class EQViewModel: ObservableObject {
         defer { isRestoring = false }
 
         let prefs = AppPreferences.load()
-        bandMode = prefs.bandMode == .parametric ? .ten : prefs.bandMode
+        preferences = prefs
         if let tenBand = prefs.tenBandGains {
             graphicGainsByMode[.ten] = normalizedGains(
                 tenBand,
                 count: EQBandMode.ten.bandCount
             )
         }
-        if let fifteenBand = prefs.fifteenBandGains {
-            graphicGainsByMode[.fifteen] = normalizedGains(
-                fifteenBand,
-                count: EQBandMode.fifteen.bandCount
+        let migratedFifteen = prefs.fifteenBandGains.map {
+            Self.resampleGraphicGains(
+                $0,
+                from: EQBandMode.fifteen.frequencies,
+                to: frequencies
             )
         }
         gains = graphicGainsByMode[bandMode]
-            ?? normalizedGains(prefs.customGains, count: bandMode.frequencies.count)
+            ?? migratedFifteen
+            ?? normalizedGains(prefs.customGains, count: frequencies.count)
         graphicGainsByMode[bandMode] = gains
         preampDB = prefs.preampDB
         selectedPresetName = prefs.selectedPresetName
@@ -810,9 +852,6 @@ final class EQViewModel: ObservableObject {
         autoPreampEnabled = prefs.autoPreampEnabled
         crossfeedEnabled = prefs.crossfeedEnabled
         crossfeedAmount = min(1, max(0, prefs.crossfeedAmount))
-        stereoWidth = min(2, max(0, prefs.stereoWidth))
-        balance = min(1, max(-1, prefs.balance))
-        monoEnabled = prefs.monoEnabled
         // SMAppService is authoritative: if the user disables the item in
         // System Settings, do not silently re-enable it from cached prefs.
         launchAtLogin = LoginItem.shared.isRegistered
@@ -829,43 +868,39 @@ final class EQViewModel: ObservableObject {
         }
 
         refreshHeadroom(applyIfEnabled: true)
-        eqEnabled = false
-        startupEQIntent = prefs.eqEnabled
+        eqEnabled = prefs.eqEnabled
     }
 
     private func persist() {
         guard !isRestoring else { return }
-        var prefs = AppPreferences.load()
-        prefs.eqEnabled = eqEnabled
-        prefs.bandMode = bandMode
+        preferences.eqEnabled = eqEnabled
+        preferences.bandMode = bandMode
         var storedGains = gains
         while storedGains.count < 15 { storedGains.append(0) }
-        prefs.customGains = Array(storedGains.prefix(15))
-        prefs.tenBandGains = graphicGainsByMode[.ten]
-        prefs.fifteenBandGains = graphicGainsByMode[.fifteen]
-        prefs.preampDB = preampDB
-        prefs.selectedPresetName = selectedPresetName
-        prefs.selectedUserPresetID = selectedUserPresetID
-        prefs.lastHeadphoneName = selectedHeadphoneName
-        prefs.activeParametricBands = activeParametricBands
-        prefs.autoPreampEnabled = autoPreampEnabled
-        prefs.autoPreampDefaultEnabled = autoPreampEnabled
-        prefs.launchAtLogin = launchAtLogin
-        prefs.hotKeyEnabled = hotKeyEnabled
-        prefs.hotKeyKeyCode = HotKeyManager.Shortcut.defaultToggleEQ.keyCode
-        prefs.hotKeyModifiers = HotKeyManager.Shortcut.defaultToggleEQ.modifiers
-        prefs.crossfeedEnabled = crossfeedEnabled
-        prefs.crossfeedAmount = crossfeedAmount
-        prefs.stereoWidth = stereoWidth
-        prefs.balance = balance
-        prefs.monoEnabled = monoEnabled
-        prefs.favoritePresetIDs = presetStore.userPresets
-            .filter(\.isFavorite)
-            .map(\.id)
-        prefs.favoriteHeadphoneNames = presetStore.favoriteHeadphoneNames
-        prefs.recentHeadphoneNames = presetStore.recentHeadphoneNames
-        prefs.deviceProfiles = presetStore.deviceProfiles
-        prefs.save()
+        preferences.customGains = Array(storedGains.prefix(15))
+        preferences.tenBandGains = gains
+        preferences.fifteenBandGains = nil
+        preferences.preampDB = preampDB
+        preferences.selectedPresetName = selectedPresetName
+        preferences.selectedUserPresetID = selectedUserPresetID
+        preferences.lastHeadphoneName = selectedHeadphoneName
+        preferences.activeParametricBands = activeParametricBands
+        preferences.autoPreampEnabled = autoPreampEnabled
+        preferences.autoPreampDefaultEnabled = autoPreampEnabled
+        preferences.launchAtLogin = launchAtLogin
+        preferences.hotKeyEnabled = hotKeyEnabled
+        preferences.hotKeyKeyCode = HotKeyManager.Shortcut.defaultToggleEQ.keyCode
+        preferences.hotKeyModifiers = HotKeyManager.Shortcut.defaultToggleEQ.modifiers
+        preferences.crossfeedEnabled = crossfeedEnabled
+        preferences.crossfeedAmount = crossfeedAmount
+
+        persistWorkItem?.cancel()
+        let snapshot = preferences
+        let work = DispatchWorkItem {
+            snapshot.save()
+        }
+        persistWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
     }
 
     private func configureSystemFeatures() {
@@ -875,13 +910,6 @@ final class EQViewModel: ObservableObject {
         refreshSystemFeatureStatus()
     }
 
-    private func applySpatialControls() {
-        audioEngine.setCrossfeedIntensity(crossfeedEnabled ? crossfeedAmount : 0)
-        audioEngine.setStereoWidth(stereoWidth)
-        audioEngine.setBalance(balance)
-        audioEngine.setMonoEnabled(monoEnabled)
-    }
-
     private func updateStatus() {
         if audioEngine.isRunning {
             permission.markEngineSucceeded()
@@ -889,7 +917,7 @@ final class EQViewModel: ObservableObject {
         if let error = audioEngine.errorMessage {
             statusText = error
         } else if eqEnabled, audioEngine.isRunning, isBypassed {
-            statusText = "Bypassed · Dry signal · \(audioEngine.outputDeviceName)"
+            statusText = "Bypassed · Level-matched dry · \(audioEngine.outputDeviceName)"
         } else if eqEnabled, audioEngine.isRunning {
             let name = selectedHeadphoneName ?? selectedPresetName
             statusText = "EQ on · \(name) · \(audioEngine.outputDeviceName)"
@@ -900,7 +928,7 @@ final class EQViewModel: ObservableObject {
         }
     }
 
-    private func suggestedCustomPresetName() -> String {
+    func suggestedCustomPresetName() -> String {
         if selectedPresetName == "Flat" || selectedPresetName == "Custom" {
             return "My EQ"
         }
@@ -912,14 +940,6 @@ final class EQViewModel: ObservableObject {
             headphoneSearch,
             limit: headphoneSearch.isEmpty ? 400 : 800
         )
-    }
-
-    private func presentAlert(title: String, message: String) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.alertStyle = .warning
-        alert.runModal()
     }
 
     private static func frequencyLabel(_ frequency: Float) -> String {
