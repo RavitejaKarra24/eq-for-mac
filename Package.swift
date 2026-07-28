@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "EQForMac",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("14.2")],
     targets: [
         .executableTarget(
             name: "EQForMac",
@@ -26,6 +26,8 @@ let package = Package(
                 .linkedFramework("AudioToolbox"),
                 .linkedFramework("AVFAudio"),
                 .linkedFramework("AppKit"),
+                .linkedFramework("Carbon"),
+                .linkedFramework("ServiceManagement"),
                 .linkedFramework("SwiftUI"),
                 .unsafeFlags([
                     "-Xlinker", "-sectcreate",
@@ -34,6 +36,11 @@ let package = Package(
                     "-Xlinker", "Sources/EQForMac/Info.plist",
                 ]),
             ]
-        )
+        ),
+        .testTarget(
+            name: "EQForMacTests",
+            dependencies: ["EQForMac"],
+            path: "Tests/EQForMacTests"
+        ),
     ]
 )

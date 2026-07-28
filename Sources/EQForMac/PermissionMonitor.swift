@@ -19,9 +19,14 @@ final class PermissionMonitor: ObservableObject {
     @Published private(set) var shouldShowBanner = false
 
     private let dismissedKey = "EQForMac.permissionBannerDismissed"
+    private var engineSucceededThisSession = false
     private var observers: [NSObjectProtocol] = []
 
     private init() {
+        // Migrate away from the old durable success bit. Permission can be
+        // revoked in System Settings, so only current probes/session proof is
+        // authoritative.
+        UserDefaults.standard.removeObject(forKey: "EQForMac.audioPermissionOK")
         refresh()
         installObservers()
     }
@@ -35,7 +40,7 @@ final class PermissionMonitor: ObservableObject {
     func refresh() {
         let preflight = CGPreflightScreenCaptureAccess()
         let probed = preflight ? true : probeProcessTapPermission()
-        let granted = preflight || probed || UserDefaults.standard.bool(forKey: "EQForMac.audioPermissionOK")
+        let granted = preflight || probed || engineSucceededThisSession
         isGranted = granted
 
         let dismissed = UserDefaults.standard.bool(forKey: dismissedKey)
@@ -45,9 +50,16 @@ final class PermissionMonitor: ObservableObject {
 
     /// Call when the EQ engine starts successfully — strongest signal.
     func markEngineSucceeded() {
-        UserDefaults.standard.set(true, forKey: "EQForMac.audioPermissionOK")
+        engineSucceededThisSession = true
         isGranted = true
         shouldShowBanner = false
+    }
+
+    /// Discard session proof after a failed engine start, then re-probe. A
+    /// non-permission audio failure will still leave a successful tap probe.
+    func invalidateEngineProof() {
+        engineSucceededThisSession = false
+        refresh()
     }
 
     func requestAccess() {
@@ -126,7 +138,6 @@ final class PermissionMonitor: ObservableObject {
         let status = AudioHardwareCreateProcessTap(desc, &tapID)
         if status == noErr, tapID != kAudioObjectUnknown {
             AudioHardwareDestroyProcessTap(tapID)
-            UserDefaults.standard.set(true, forKey: "EQForMac.audioPermissionOK")
             return true
         }
         return false

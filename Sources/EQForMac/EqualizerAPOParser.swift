@@ -41,6 +41,7 @@ enum EqualizerAPOParser {
             var frequency: Float?
             var gain: Float = 0
             var q: Float = 1.0
+            var octaveBandwidth: Float?
 
             var i = 0
             while i < tokens.count {
@@ -64,10 +65,17 @@ enum EqualizerAPOParser {
                         gain = v
                         i += 1
                     }
-                } else if upper == "Q" || upper == "BW" {
-                    if i + 1 < tokens.count, let v = Float(tokens[i + 1]) {
+                } else if upper == "Q" {
+                    if let (v, valueIndex) = numericValue(after: i, in: tokens) {
                         q = v
-                        i += 1
+                        i = valueIndex
+                    }
+                } else if upper == "BW" {
+                    // Equalizer APO accepts both "BW 1.2" and
+                    // "BW Oct 1.2" for octave bandwidth.
+                    if let (v, valueIndex) = numericValue(after: i, in: tokens) {
+                        octaveBandwidth = v
+                        i = valueIndex
                     }
                 }
                 i += 1
@@ -76,12 +84,8 @@ enum EqualizerAPOParser {
             guard let freq = frequency, let typeTok = typeToken else { continue }
 
             let filterType = EQFilterType.fromAPO(typeTok)
-            let bandwidth: Float
-            if typeTok == "BW" {
-                bandwidth = max(0.05, min(5, q))
-            } else {
-                bandwidth = EQBand.bandwidthFromQ(q)
-            }
+            let bandwidth = octaveBandwidth.map { max(0.05, min(5, $0)) }
+                ?? EQBand.bandwidthFromQ(q)
 
             bands.append(
                 EQBand(
@@ -110,6 +114,7 @@ enum EqualizerAPOParser {
         // Split on whitespace and strip trailing punctuation like "Hz," "dB,"
         line
             .replacingOccurrences(of: ",", with: " ")
+            .replacingOccurrences(of: ":", with: " ")
             .components(separatedBy: .whitespaces)
             .map { token in
                 var t = token
@@ -119,6 +124,20 @@ enum EqualizerAPOParser {
                 return t
             }
             .filter { !$0.isEmpty && $0 != ":" }
+    }
+
+    private static func numericValue(
+        after index: Int,
+        in tokens: [String]
+    ) -> (value: Float, index: Int)? {
+        guard index + 1 < tokens.count else { return nil }
+        let lastCandidate = min(index + 2, tokens.count - 1)
+        for candidate in (index + 1)...lastCandidate {
+            if let value = Float(tokens[candidate]) {
+                return (value, candidate)
+            }
+        }
+        return nil
     }
 
     private static func firstNumber(in line: String) -> Float? {

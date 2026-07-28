@@ -14,11 +14,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Menu-bar only — no Dock icon.
         NSApp.setActivationPolicy(.accessory)
 
-        // Check permission without nagging if already granted (CGPreflight is flaky).
+        // Check permission without firing a context-free TCC prompt. The panel
+        // presents a guided explanation before requesting access.
         PermissionMonitor.shared.refresh()
-        if PermissionMonitor.shared.shouldShowBanner {
-            PermissionMonitor.shared.requestAccess()
-        }
 
         audioEngine = AudioEngine()
         presetStore = PresetStore()
@@ -81,6 +79,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
+        let settings = NSMenuItem(
+            title: "Settings…",
+            action: #selector(showSettings(_:)),
+            keyEquivalent: ","
+        )
+        settings.keyEquivalentModifierMask = [.command]
+        settings.target = self
+        appMenu.addItem(settings)
+        appMenu.addItem(.separator())
         appMenu.addItem(
             withTitle: "Quit EQ for Mac",
             action: #selector(NSApplication.terminate(_:)),
@@ -103,6 +110,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(editItem)
 
         NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func showSettings(_ sender: Any?) {
+        NotificationCenter.default.post(name: .showEQForMacSettings, object: nil)
     }
 }
 

@@ -12,6 +12,7 @@ CONFIGURATION="${CONFIGURATION:-release}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/dist}"
 ARCHS="${ARCHS:-}"
 PREBUILT_BIN_DIR="${PREBUILT_BIN_DIR:-}"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
   echo "VERSION must look like 1.2.3 (received: $VERSION)" >&2
@@ -87,9 +88,17 @@ else
   /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION" "$RESOURCE_PLIST"
 fi
 
-echo "Ad-hoc signing app…"
-codesign --force --sign - --timestamp=none "$RESOURCE_BUNDLE"
-codesign --force --sign - --timestamp=none "$APP_PATH"
+codesign_args=(--force --sign "$CODESIGN_IDENTITY")
+if [[ "$CODESIGN_IDENTITY" == "-" ]]; then
+  echo "Ad-hoc signing app…"
+  codesign_args+=(--timestamp=none)
+else
+  echo "Signing app with identity: $CODESIGN_IDENTITY"
+  codesign_args+=(--options runtime --timestamp)
+fi
+
+codesign "${codesign_args[@]}" "$RESOURCE_BUNDLE"
+codesign "${codesign_args[@]}" "$APP_PATH"
 
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 plutil -lint "$APP_PATH/Contents/Info.plist"

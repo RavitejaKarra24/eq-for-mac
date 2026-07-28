@@ -1,3 +1,4 @@
+import Accelerate
 import AVFAudio
 import AudioToolbox
 import Combine
@@ -13,6 +14,7 @@ nonisolated(unsafe) private var rtRingBuffer: AudioRingBuffer?
 nonisolated(unsafe) private var rtChannelCount: UInt32 = 2
 nonisolated(unsafe) private var rtScratchBuffer: UnsafeMutablePointer<Float>?
 nonisolated(unsafe) private var rtScratchCapacity: Int = 0
+nonisolated(unsafe) private var rtStereoProcessor: StereoProcessor?
 
 /// AVAudioSourceNode render block: pull interleaved samples from the ring buffer
 /// and deinterleave into the engine's non-interleaved format.
@@ -22,33 +24,47 @@ private func renderCallback(
     frameCount: UInt32,
     audioBufferList: UnsafeMutablePointer<AudioBufferList>
 ) -> OSStatus {
-    guard let ringBuf = rtRingBuffer else { return noErr }
-
     let channels = Int(rtChannelCount)
     let frames = Int(frameCount)
     let interleavedCount = frames * channels
     let bufferList = UnsafeMutableAudioBufferListPointer(audioBufferList)
 
-    if rtScratchCapacity < interleavedCount {
-        rtScratchBuffer?.deallocate()
-        rtScratchBuffer = .allocate(capacity: interleavedCount)
-        rtScratchCapacity = interleavedCount
+    guard let ringBuf = rtRingBuffer,
+          let scratch = rtScratchBuffer,
+          rtScratchCapacity >= interleavedCount
+    else {
+        for buffer in bufferList {
+            if let data = buffer.mData {
+                memset(data, 0, Int(buffer.mDataByteSize))
+            }
+        }
+        return noErr
     }
-    guard let scratch = rtScratchBuffer else { return noErr }
 
     let read = ringBuf.read(scratch, count: interleavedCount)
     if read < interleavedCount {
-        scratch.advanced(by: read).initialize(repeating: 0, count: interleavedCount - read)
+        memset(
+            scratch.advanced(by: read),
+            0,
+            (interleavedCount - read) * MemoryLayout<Float>.stride
+        )
     }
 
+    var unity: Float = 1
     for channelIndex in 0..<bufferList.count {
         guard let outData = bufferList[channelIndex].mData?.assumingMemoryBound(to: Float.self)
         else { continue }
-        for f in 0..<frames {
-            let srcIndex = f * channels + min(channelIndex, channels - 1)
-            outData[f] = scratch[srcIndex]
-        }
+        let sourceChannel = min(channelIndex, channels - 1)
+        vDSP_vsmul(
+            scratch.advanced(by: sourceChannel),
+            vDSP_Stride(channels),
+            &unity,
+            outData,
+            1,
+            vDSP_Length(frames)
+        )
     }
+    rtStereoProcessor?.process(bufferList, frameCount: frames)
     return noErr
 }
 
@@ -58,15 +74,30 @@ private func renderCallback(
 ///
 /// Pipeline:
 ///   Apps → (muted) CATap → Aggregate Device IOProc → Ring Buffer
-///        → AVAudioSourceNode → AVAudioUnitEQ → Peak Limiter → Output Device
+///        → AVAudioSourceNode/Stereo Stage → AVAudioUnitEQ → Peak Limiter
+///        → Output Device
 @available(macOS 14.2, *)
 @MainActor
 final class AudioEngine: ObservableObject {
     @Published private(set) var isRunning = false
     @Published private(set) var outputDeviceName = "Unknown"
+    @Published private(set) var outputDeviceUID: String?
     @Published private(set) var errorMessage: String?
+    /// 64 normalized 0...1 bins, spaced logarithmically from 20 Hz to 20 kHz
+    /// (or Nyquist when lower).
+    @Published private(set) var spectrumMagnitudes = Array(
+        repeating: Float(0),
+        count: SpectrumAnalyzer.binCount
+    )
+    @Published private(set) var crossfeedIntensity: Float = 0
+    @Published private(set) var stereoWidth: Float = 1
+    @Published private(set) var balance: Float = 0
+    @Published private(set) var monoEnabled = false
     @Published var bypassed = false {
-        didSet { applyEQ() }
+        didSet {
+            applyEQ()
+            updateStereoProcessorSettings()
+        }
     }
 
     private var tapID = AudioObjectID(kAudioObjectUnknown)
@@ -77,20 +108,33 @@ final class AudioEngine: ObservableObject {
     private var limiterNode: AVAudioUnitEffect?
     private var sourceNode: AVAudioSourceNode?
     private var ringBuffer: AudioRingBuffer?
+    private var spectrumAnalyzer: SpectrumAnalyzer?
+    private var stereoProcessor: StereoProcessor?
     private var tapUUID = UUID()
     private var deviceChangeListener: AudioObjectPropertyListenerBlock?
+    private var outputFormatListener: AudioObjectPropertyListenerBlock?
+    private var observedOutputDeviceID = AudioObjectID(kAudioObjectUnknown)
+    private var restartWorkItem: DispatchWorkItem?
+    private var restartGeneration: UInt64 = 0
+    private var spectrumMonitoringEnabled = false
     private var activePreset: EQPreset = .flat()
-    private var maxBandSlots = 31
+    // Imported presets commonly use 10 bands; non-destructive curve edits add
+    // overlay filters instead of replacing them, so leave ample headroom.
+    private let maxBandSlots = 64
+    private let renderScratchFrameCapacity = 16_384
     private var sampleRate: Double = 48_000
 
     var onStateChange: (() -> Void)?
+    var onOutputDeviceChange: ((_ uid: String, _ name: String) -> Void)?
 
     init() {
         do {
             let id = try getDefaultOutputDeviceID()
-            outputDeviceName = try getDeviceName(id)
+            refreshOutputDeviceInfo(id, notify: false)
+            installOutputFormatListener(for: id)
         } catch {
             outputDeviceName = "Unknown"
+            outputDeviceUID = nil
         }
         installDeviceChangeListener()
     }
@@ -110,6 +154,32 @@ final class AudioEngine: ObservableObject {
                 block
             )
         }
+        if observedOutputDeviceID != kAudioObjectUnknown,
+           let block = outputFormatListener {
+            var rateAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyNominalSampleRate,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(
+                observedOutputDeviceID,
+                &rateAddress,
+                DispatchQueue.main,
+                block
+            )
+            var streamAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyStreamFormat,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(
+                observedOutputDeviceID,
+                &streamAddress,
+                DispatchQueue.main,
+                block
+            )
+        }
+        restartWorkItem?.cancel()
     }
 
     // MARK: - Public control
@@ -120,6 +190,7 @@ final class AudioEngine: ObservableObject {
                 try start()
                 errorMessage = nil
             } catch {
+                tearDownAudioGraph(notify: false)
                 errorMessage = error.localizedDescription
                 isRunning = false
                 os_log(.error, log: log, "start failed: %{public}@", error.localizedDescription)
@@ -128,6 +199,31 @@ final class AudioEngine: ObservableObject {
             stop()
         }
         onStateChange?()
+    }
+
+    func setSpectrumMonitoringEnabled(_ enabled: Bool) {
+        spectrumMonitoringEnabled = enabled
+        spectrumAnalyzer?.setMonitoringEnabled(enabled)
+    }
+
+    func setCrossfeedIntensity(_ intensity: Float) {
+        crossfeedIntensity = max(0, min(1, intensity))
+        updateStereoProcessorSettings()
+    }
+
+    func setStereoWidth(_ width: Float) {
+        stereoWidth = max(0, min(2, width))
+        updateStereoProcessorSettings()
+    }
+
+    func setBalance(_ balance: Float) {
+        self.balance = max(-1, min(1, balance))
+        updateStereoProcessorSettings()
+    }
+
+    func setMonoEnabled(_ enabled: Bool) {
+        monoEnabled = enabled
+        updateStereoProcessorSettings()
     }
 
     func apply(preset: EQPreset) {
@@ -144,7 +240,8 @@ final class AudioEngine: ObservableObject {
 
         let outputDeviceID = try getDefaultOutputDeviceID()
         let outputUID = try getDeviceUID(outputDeviceID)
-        outputDeviceName = try getDeviceName(outputDeviceID)
+        refreshOutputDeviceInfo(outputDeviceID, notify: true)
+        installOutputFormatListener(for: outputDeviceID)
 
         // Exclude our own process from the tap so we don't mute our playback.
         var translateAddress = AudioObjectPropertyAddress(
@@ -189,11 +286,14 @@ final class AudioEngine: ObservableObject {
             "Failed to get tap format"
         )
         let channels = tapFormat.mChannelsPerFrame
+        guard channels > 0 else {
+            throw AudioError.message("Tap reported no audio channels")
+        }
 
         // Prefer device native sample rate
         var rateAddress = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyNominalSampleRate,
-            mScope: kAudioObjectPropertyScopeOutput,
+            mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
         var deviceRate: Float64 = 0
@@ -249,10 +349,21 @@ final class AudioEngine: ObservableObject {
         }
 
         // Ring buffer + AVAudioEngine
-        let ring = AudioRingBuffer(capacityFrames: Int(rate * 0.5), channels: Int(channels))
+        let ring = AudioRingBuffer(
+            capacityFrames: Int(rate * 0.5),
+            channels: Int(channels),
+            overrunBehavior: .discardStaleOnRead
+        )
         ringBuffer = ring
         rtRingBuffer = ring
         rtChannelCount = channels
+
+        let requiredScratchSamples = renderScratchFrameCapacity * Int(channels)
+        let oldScratch = rtScratchBuffer
+        rtScratchBuffer = .allocate(capacity: requiredScratchSamples)
+        rtScratchBuffer?.initialize(repeating: 0, count: requiredScratchSamples)
+        rtScratchCapacity = requiredScratchSamples
+        oldScratch?.deallocate()
 
         let avEngine = AVAudioEngine()
 
@@ -275,12 +386,33 @@ final class AudioEngine: ObservableObject {
             throw AudioError.message("Failed to create AVAudioFormat")
         }
 
+        let processor = StereoProcessor(sampleRate: rate)
+        stereoProcessor = processor
+        rtStereoProcessor = processor
+        updateStereoProcessorSettings()
+        processor.scheduleGainRamp(
+            to: 1,
+            durationFrames: max(1, Int(rate * 0.02))
+        )
+
+        let analyzer = SpectrumAnalyzer(
+            sampleRate: rate,
+            channelCount: Int(channels)
+        ) { [weak self] magnitudes in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isRunning else { return }
+                self.spectrumMagnitudes = magnitudes
+            }
+        }
+        analyzer?.setMonitoringEnabled(spectrumMonitoringEnabled)
+        spectrumAnalyzer = analyzer
+
         let source = AVAudioSourceNode(format: format, renderBlock: renderCallback)
         sourceNode = source
 
         let eq = AVAudioUnitEQ(numberOfBands: maxBandSlots)
         configureEQBands(eq, with: activePreset)
-        eq.globalGain = activePreset.preampDB
+        eq.globalGain = max(-24, min(6, activePreset.preampDB))
         eq.bypass = bypassed || activePreset.isFlat
         eqNode = eq
 
@@ -321,7 +453,9 @@ final class AudioEngine: ObservableObject {
             for i in 0..<inList.count {
                 guard let data = inList[i].mData else { continue }
                 let sampleCount = Int(inList[i].mDataByteSize) / MemoryLayout<Float>.size
-                ringBuf.write(data.assumingMemoryBound(to: Float.self), count: sampleCount)
+                let samples = data.assumingMemoryBound(to: Float.self)
+                ringBuf.write(samples, count: sampleCount)
+                analyzer?.submitInterleaved(samples, count: sampleCount)
             }
 
             let outList = UnsafeMutableAudioBufferListPointer(outOutputData)
@@ -342,17 +476,28 @@ final class AudioEngine: ObservableObject {
         )
 
         isRunning = true
+        analyzer?.start()
         // Real proof that system-audio capture is allowed (preflight can lie).
         PermissionMonitor.shared.markEngineSucceeded()
         onStateChange?()
     }
 
     func stop() {
-        guard isRunning || engine != nil || tapID != kAudioObjectUnknown else { return }
-        isRunning = false
+        restartGeneration &+= 1
+        restartWorkItem?.cancel()
+        restartWorkItem = nil
+        tearDownAudioGraph()
+    }
 
-        rtRingBuffer = nil
-        ringBuffer = nil
+    private func tearDownAudioGraph(notify: Bool = true) {
+        guard isRunning
+                || engine != nil
+                || tapID != kAudioObjectUnknown
+                || aggregateDeviceID != kAudioObjectUnknown
+        else {
+            return
+        }
+        isRunning = false
 
         if let procID {
             AudioDeviceStop(aggregateDeviceID, procID)
@@ -361,6 +506,23 @@ final class AudioEngine: ObservableObject {
         }
 
         engine?.stop()
+        rtRingBuffer = nil
+        rtStereoProcessor = nil
+
+        spectrumAnalyzer?.stop()
+        spectrumAnalyzer = nil
+        spectrumMagnitudes = Array(
+            repeating: 0,
+            count: SpectrumAnalyzer.binCount
+        )
+        stereoProcessor = nil
+        ringBuffer = nil
+
+        let oldScratch = rtScratchBuffer
+        rtScratchBuffer = nil
+        rtScratchCapacity = 0
+        oldScratch?.deallocate()
+
         engine = nil
         eqNode = nil
         limiterNode = nil
@@ -375,17 +537,32 @@ final class AudioEngine: ObservableObject {
             tapID = AudioObjectID(kAudioObjectUnknown)
         }
 
-        onStateChange?()
+        if notify {
+            onStateChange?()
+        }
     }
 
     // MARK: - EQ application
 
     private func applyEQ() {
-        guard let eq = eqNode else { return }
-        configureEQBands(eq, with: activePreset)
-        eq.globalGain = activePreset.preampDB
-        eq.bypass = bypassed || activePreset.isFlat
+        if let eq = eqNode {
+            configureEQBands(eq, with: activePreset)
+            eq.globalGain = max(-24, min(6, activePreset.preampDB))
+            eq.bypass = bypassed || activePreset.isFlat
+        }
         limiterNode?.bypass = bypassed
+    }
+
+    private func updateStereoProcessorSettings() {
+        stereoProcessor?.update(
+            settings: StereoProcessor.Settings(
+                crossfeedIntensity: crossfeedIntensity,
+                stereoWidth: stereoWidth,
+                balance: balance,
+                monoEnabled: monoEnabled,
+                bypassed: bypassed
+            )
+        )
     }
 
     private func configureEQBands(_ eq: AVAudioUnitEQ, with preset: EQPreset) {
@@ -414,11 +591,8 @@ final class AudioEngine: ObservableObject {
             mElement: kAudioObjectPropertyElementMain
         )
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                Task { @MainActor in
-                    self.handleDefaultDeviceChange()
-                }
+            DispatchQueue.main.async { [weak self] in
+                self?.handleDefaultDeviceChange()
             }
         }
         deviceChangeListener = block
@@ -430,23 +604,136 @@ final class AudioEngine: ObservableObject {
         )
     }
 
+    private func installOutputFormatListener(for deviceID: AudioDeviceID) {
+        guard deviceID != kAudioObjectUnknown else { return }
+        if observedOutputDeviceID == deviceID, outputFormatListener != nil {
+            return
+        }
+
+        removeOutputFormatListener()
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            DispatchQueue.main.async { [weak self] in
+                self?.handleOutputFormatChange()
+            }
+        }
+        outputFormatListener = block
+        observedOutputDeviceID = deviceID
+
+        for var address in outputFormatPropertyAddresses() {
+            AudioObjectAddPropertyListenerBlock(
+                deviceID,
+                &address,
+                DispatchQueue.main,
+                block
+            )
+        }
+    }
+
+    private func removeOutputFormatListener() {
+        guard observedOutputDeviceID != kAudioObjectUnknown,
+              let block = outputFormatListener
+        else {
+            return
+        }
+        for var address in outputFormatPropertyAddresses() {
+            AudioObjectRemovePropertyListenerBlock(
+                observedOutputDeviceID,
+                &address,
+                DispatchQueue.main,
+                block
+            )
+        }
+        outputFormatListener = nil
+        observedOutputDeviceID = AudioObjectID(kAudioObjectUnknown)
+    }
+
+    private func outputFormatPropertyAddresses() -> [AudioObjectPropertyAddress] {
+        [
+            AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyNominalSampleRate,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            ),
+            AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyStreamFormat,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementMain
+            ),
+        ]
+    }
+
+    private func refreshOutputDeviceInfo(
+        _ deviceID: AudioDeviceID,
+        notify: Bool
+    ) {
+        let previousUID = outputDeviceUID
+        let previousName = outputDeviceName
+        do {
+            let uid = try getDeviceUID(deviceID)
+            let name = try getDeviceName(deviceID)
+            outputDeviceUID = uid
+            outputDeviceName = name
+            if notify, uid != previousUID || name != previousName {
+                onOutputDeviceChange?(uid, name)
+            }
+        } catch {
+            // Preserve the last valid identity while a Bluetooth device is
+            // still publishing its Core Audio properties.
+        }
+    }
+
     private func handleDefaultDeviceChange() {
-        // Refresh device name; restart if EQ is running so we follow the new output.
         do {
             let id = try getDefaultOutputDeviceID()
-            outputDeviceName = try getDeviceName(id)
+            refreshOutputDeviceInfo(id, notify: true)
+            installOutputFormatListener(for: id)
         } catch {
-            // keep previous name
+            // Keep the prior identity until Core Audio finishes reconnecting.
         }
 
         if isRunning {
-            stop()
-            // Small delay helps Bluetooth devices finish reconnection.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                self?.setEnabled(true)
-            }
+            scheduleRestart(reconnectDelay: 0.35)
         } else {
             onStateChange?()
         }
+    }
+
+    private func handleOutputFormatChange() {
+        guard isRunning else { return }
+        // Debounce bursts of nominal-rate and stream-format notifications.
+        scheduleRestart(reconnectDelay: 0.12)
+    }
+
+    private func scheduleRestart(reconnectDelay: TimeInterval) {
+        restartGeneration &+= 1
+        let generation = restartGeneration
+        restartWorkItem?.cancel()
+
+        let fadeDuration: TimeInterval = 0.02
+        stereoProcessor?.scheduleGainRamp(
+            to: 0,
+            durationFrames: max(1, Int(sampleRate * fadeDuration))
+        )
+
+        let fadeWork = DispatchWorkItem { [weak self] in
+            guard let self, self.restartGeneration == generation else { return }
+            self.tearDownAudioGraph()
+
+            let restartWork = DispatchWorkItem { [weak self] in
+                guard let self, self.restartGeneration == generation else { return }
+                self.restartWorkItem = nil
+                self.setEnabled(true)
+            }
+            self.restartWorkItem = restartWork
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + reconnectDelay,
+                execute: restartWork
+            )
+        }
+        restartWorkItem = fadeWork
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + fadeDuration + 0.005,
+            execute: fadeWork
+        )
     }
 }

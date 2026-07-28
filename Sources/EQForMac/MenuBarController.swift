@@ -8,21 +8,40 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let viewModel: EQViewModel
     private var popover: NSPopover!
     private var eventMonitor: Any?
+    private var localScrollMonitor: Any?
+    private var globalScrollMonitor: Any?
+    private var settingsWindowController: SettingsWindowController!
+    private var lastScrollAdjustment = Date.distantPast
 
     init(viewModel: EQViewModel) {
         self.viewModel = viewModel
         super.init()
         setupStatusItem()
         setupPopover()
+        settingsWindowController = SettingsWindowController(model: viewModel)
+        installScrollMonitors()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(showSettingsFromNotification(_:)),
+            name: .showEQForMacSettings,
+            object: nil
+        )
         viewModel.refreshIcon = { [weak self] in
             self?.updateIcon()
         }
         updateIcon()
-        // Refresh only — don't force the TCC dialog every launch if already granted.
+        // The guided onboarding in the panel decides when to request access.
         viewModel.refreshPermission()
-        if viewModel.permissionHint {
-            viewModel.requestPermissionIfNeeded()
+    }
+
+    deinit {
+        if let localScrollMonitor {
+            NSEvent.removeMonitor(localScrollMonitor)
         }
+        if let globalScrollMonitor {
+            NSEvent.removeMonitor(globalScrollMonitor)
+        }
+        NotificationCenter.default.removeObserver(self)
     }
 
     // MARK: - Setup
@@ -46,7 +65,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func setupPopover() {
         popover = NSPopover()
-        popover.contentSize = NSSize(width: 460, height: 660)
+        popover.contentSize = NSSize(width: 500, height: 700)
         popover.behavior = .transient
         popover.animates = true
         popover.contentViewController = NSHostingController(
@@ -65,6 +84,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         if event.type == .rightMouseUp
             || event.modifierFlags.contains(.control) {
             showContextMenu()
+        } else if event.modifierFlags.contains(.option) {
+            showQuickMenu()
         } else {
             togglePopover()
         }
@@ -119,6 +140,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
 
+        let settings = NSMenuItem(
+            title: "Settings…",
+            action: #selector(showSettingsFromMenu(_:)),
+            keyEquivalent: ","
+        )
+        settings.keyEquivalentModifierMask = [.command]
+        settings.target = self
+        menu.addItem(settings)
+
+        menu.addItem(.separator())
+
         let quit = NSMenuItem(
             title: "Quit EQ for Mac",
             action: #selector(quitApp(_:)),
@@ -151,12 +183,113 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         NSApp.terminate(nil)
     }
 
+    @objc private func showSettingsFromMenu(_ sender: Any?) {
+        settingsWindowController.show()
+    }
+
+    @objc private func showSettingsFromNotification(_ notification: Notification) {
+        if popover.isShown {
+            popover.performClose(nil)
+            removeEventMonitor()
+        }
+        settingsWindowController.show()
+    }
+
+    // MARK: - Compact controls
+
+    private func showQuickMenu() {
+        if popover.isShown {
+            popover.performClose(nil)
+            removeEventMonitor()
+        }
+
+        let menu = NSMenu()
+        let status = NSMenuItem(
+            title: "\(viewModel.selectedPresetName) · \(String(format: "%+.1f dB", viewModel.preampDB))",
+            action: nil,
+            keyEquivalent: ""
+        )
+        status.isEnabled = false
+        menu.addItem(status)
+        menu.addItem(.separator())
+
+        let bypass = NSMenuItem(
+            title: viewModel.isBypassed ? "Resume Processing" : "Bypass",
+            action: #selector(toggleBypassFromMenu(_:)),
+            keyEquivalent: "b"
+        )
+        bypass.target = self
+        menu.addItem(bypass)
+
+        let down = NSMenuItem(
+            title: "Preamp −0.5 dB",
+            action: #selector(lowerPreampFromMenu(_:)),
+            keyEquivalent: ""
+        )
+        down.target = self
+        menu.addItem(down)
+
+        let up = NSMenuItem(
+            title: "Preamp +0.5 dB",
+            action: #selector(raisePreampFromMenu(_:)),
+            keyEquivalent: ""
+        )
+        up.target = self
+        menu.addItem(up)
+
+        menu.addItem(.separator())
+        for preset in viewModel.presetStore.builtIn.prefix(6) {
+            let item = NSMenuItem(
+                title: preset.name,
+                action: #selector(applyPresetFromQuickMenu(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = preset
+            item.state = viewModel.selectedUserPresetID == nil
+                && viewModel.selectedHeadphoneName == nil
+                && viewModel.selectedPresetName == preset.name
+                ? .on
+                : .off
+            menu.addItem(item)
+        }
+
+        present(menu: menu)
+    }
+
+    @objc private func toggleBypassFromMenu(_ sender: Any?) {
+        viewModel.toggleBypass()
+    }
+
+    @objc private func lowerPreampFromMenu(_ sender: Any?) {
+        viewModel.adjustPreamp(by: -0.5)
+    }
+
+    @objc private func raisePreampFromMenu(_ sender: Any?) {
+        viewModel.adjustPreamp(by: 0.5)
+    }
+
+    @objc private func applyPresetFromQuickMenu(_ sender: NSMenuItem) {
+        guard let preset = sender.representedObject as? EQPreset else { return }
+        viewModel.applyBuiltInPreset(preset)
+    }
+
+    private func present(menu: NSMenu) {
+        statusItem.menu = menu
+        statusItem.button?.performClick(nil)
+        DispatchQueue.main.async { [weak self] in
+            self?.statusItem.menu = nil
+        }
+    }
+
     // MARK: - Icon
 
     func updateIcon() {
         guard let button = statusItem.button else { return }
         let symbol: String
-        if viewModel.eqEnabled && viewModel.audioEngine.isRunning {
+        if viewModel.eqEnabled && viewModel.audioEngine.isRunning && viewModel.isBypassed {
+            symbol = "waveform.slash"
+        } else if viewModel.eqEnabled && viewModel.audioEngine.isRunning {
             symbol = "slider.vertical.3"
         } else if viewModel.eqEnabled {
             symbol = "exclamationmark.triangle"
@@ -166,9 +299,51 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "EQ for Mac")
         button.image?.isTemplate = true
         button.appearsDisabled = !viewModel.eqEnabled
-        button.toolTip = viewModel.eqEnabled
-            ? "EQ for Mac — ON (\(viewModel.selectedPresetName))"
-            : "EQ for Mac — OFF"
+        if viewModel.eqEnabled {
+            let state = viewModel.isBypassed ? "BYPASSED" : "ON"
+            button.toolTip = """
+            EQ for Mac — \(state)
+            \(viewModel.selectedPresetName) · \(String(format: "%+.1f dB", viewModel.preampDB))
+            Scroll to adjust preamp · Option-click for quick controls
+            """
+        } else {
+            button.toolTip = "EQ for Mac — OFF · Option-click for quick controls"
+        }
+    }
+
+    // MARK: - Scroll-to-adjust preamp
+
+    private func installScrollMonitors() {
+        localScrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) {
+            [weak self] event in
+            guard let self, self.pointerIsOverStatusItem() else { return event }
+            self.handleStatusItemScroll(event)
+            return nil
+        }
+
+        globalScrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) {
+            [weak self] event in
+            Task { @MainActor in
+                guard let self, self.pointerIsOverStatusItem() else { return }
+                self.handleStatusItemScroll(event)
+            }
+        }
+    }
+
+    private func pointerIsOverStatusItem() -> Bool {
+        guard let button = statusItem.button, let window = button.window else { return false }
+        let rectInWindow = button.convert(button.bounds, to: nil)
+        let rectOnScreen = window.convertToScreen(rectInWindow)
+        return rectOnScreen.contains(NSEvent.mouseLocation)
+    }
+
+    private func handleStatusItemScroll(_ event: NSEvent) {
+        guard abs(event.scrollingDeltaY) >= 0.1,
+              Date().timeIntervalSince(lastScrollAdjustment) >= 0.055
+        else { return }
+        lastScrollAdjustment = Date()
+        viewModel.adjustPreamp(by: event.scrollingDeltaY > 0 ? 0.5 : -0.5)
+        updateIcon()
     }
 
     // MARK: - Click-outside to dismiss
