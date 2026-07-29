@@ -56,12 +56,44 @@ Thank you to [Sharur](https://www.youtube.com/@Sharur) and [PEQdB](https://peqdb
 
 ---
 
-## Install from source
+## Normal installation
 
-EQ for Mac intentionally ships without a DMG, Homebrew Cask, or other prebuilt
-binary. Clone the source, inspect it if you want, and build the app locally with
-Apple's free Xcode Command Line Tools. No Apple ID, paid developer account,
-notarization, or administrator access is required.
+The prebuilt app supports both Apple silicon and Intel Macs. No Terminal, Xcode,
+or build tools are needed.
+
+1. **[Download EQ for Mac.dmg](EQ-for-Mac.dmg).**
+2. Open the downloaded DMG and drag **EQ for Mac** into the **Applications** folder.
+3. Eject the DMG, then attempt to open **EQ for Mac** from Applications.
+4. If macOS says Apple could not verify the app, click **Done**. Open **System
+   Settings → Privacy & Security**, scroll to **Security**, click **Open Anyway**
+   beside EQ for Mac, and confirm **Open**.
+5. Look for the slider icon in the menu bar; EQ for Mac intentionally has no Dock icon.
+
+The downloadable app is ad-hoc signed and its source is available in this
+repository, but it is not Apple-notarized. The **Open Anyway** step is therefore
+expected on first launch. It does not require disabling Gatekeeper.
+
+### Required audio permission
+
+The panel guides you through granting **Screen & System Audio Recording**. This
+permission is required by Core Audio Process Taps.
+
+1. Open **System Settings → Privacy & Security → Screen & System Audio Recording**.
+2. Enable **EQ for Mac**.
+3. Toggle the EQ off and on again.
+
+The app processes audio locally and does not save or upload it.
+
+### Update or uninstall
+
+To update, download the latest DMG and replace the existing app in Applications.
+To uninstall, quit EQ for Mac and move it from Applications to the Trash.
+
+## Developer installation
+
+Clone the source, inspect or modify it, and build the app locally with Apple's
+free Xcode Command Line Tools. No Apple ID, paid developer account, notarization,
+or administrator access is required.
 
 ### One-time setup
 
@@ -226,14 +258,14 @@ The tap mutes the direct path to the speakers so you only hear the processed str
 
 ```text
 eq-for-mac/
-├── .github/workflows/ci.yml      # Tests, builds, and validates the app
+├── EQ-for-Mac.dmg                # Prebuilt app for normal installation
 ├── Package.swift                 # SwiftPM package
 ├── Tests/EQForMacTests/          # Parser, models, headroom, preset, and ring-buffer tests
 ├── install.sh                    # Build, install to ~/Applications, and launch
 ├── README.md
 ├── docs/images/                  # Screenshots for this README
 ├── scripts/build-app.sh          # Assemble and ad-hoc sign the local app bundle
-├── scripts/package-dmg.sh        # Optional Developer ID + notarized DMG path
+├── scripts/package-dmg.sh        # Create the distributable DMG
 ├── scripts/                      # Offline catalog fill / backfill tools
 └── Sources/EQForMac/
     ├── AppDelegate.swift         # Menu-bar app entry
@@ -290,10 +322,25 @@ Useful starting points:
 Regenerating the offline catalog is optional and requires Python plus the AutoEq
 library; see the scripts under `scripts/`.
 
-### Optional signed DMG (maintainers)
+### Build the distributable DMG (maintainers)
 
-The default source-install path remains ad-hoc signed. Maintainers with a
-Developer ID Application certificate can also create a hardened-runtime DMG:
+The checked-in download is a universal, ad-hoc signed DMG. Rebuild it from the
+current source with:
+
+```bash
+ARCHS="arm64 x86_64" \
+VERSION=1.0.0 \
+BUILD_NUMBER=1 \
+DMG_PATH="$PWD/EQ-for-Mac.dmg" \
+scripts/package-dmg.sh
+```
+
+Before publishing a new build, update the version and increment the build
+number. `package-dmg.sh` verifies the bundle signature and prints the resulting
+DMG's SHA-256 checksum.
+
+Maintainers with a Developer ID Application certificate can instead create a
+hardened-runtime DMG:
 
 ```bash
 VERSION=1.2.3 \
@@ -326,8 +373,8 @@ repository.
 - Some DRM / protected paths may behave differently depending on OS version and app.
 - Bluetooth/output changes are faded and debounced, but hardware reconnection
   can still produce a short gap.
-- The app is built and ad-hoc signed on each user's Mac; there are no prebuilt
-  downloads or automatic updates.
+- The prebuilt download is ad-hoc signed rather than Apple-notarized, so macOS
+  requires **Open Anyway** on first launch. There are no automatic updates.
 - Launch at login uses `SMAppService` and must be exercised from the installed
   application bundle. macOS can require approval under **General → Login Items**;
   raw `swift run` executables cannot register.
