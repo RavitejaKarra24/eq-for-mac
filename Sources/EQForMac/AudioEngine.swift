@@ -106,6 +106,90 @@ final class AudioRenderContext: @unchecked Sendable {
     }
 }
 
+/// Converts any tap buffer layout into the interleaved samples consumed by the
+/// ring buffer. Core Audio may provide one interleaved buffer or multiple
+/// non-interleaved buffers depending on the tapped device.
+final class TapInputContext: @unchecked Sendable {
+    private let ringBuffer: AudioRingBuffer
+    private let spectrumAnalyzer: SpectrumAnalyzer?
+    private let channelCount: Int
+    private let scratchCapacity: Int
+    private let scratch: UnsafeMutablePointer<Float>
+
+    init(
+        ringBuffer: AudioRingBuffer,
+        spectrumAnalyzer: SpectrumAnalyzer?,
+        channelCount: Int,
+        scratchFrameCapacity: Int
+    ) {
+        self.ringBuffer = ringBuffer
+        self.spectrumAnalyzer = spectrumAnalyzer
+        self.channelCount = max(1, channelCount)
+        scratchCapacity = max(1, scratchFrameCapacity) * self.channelCount
+        scratch = .allocate(capacity: scratchCapacity)
+        scratch.initialize(repeating: 0, count: scratchCapacity)
+    }
+
+    deinit {
+        scratch.deallocate()
+    }
+
+    @inline(__always)
+    func consume(_ audioBufferList: UnsafePointer<AudioBufferList>) {
+        let bufferList = UnsafeMutableAudioBufferListPointer(
+            UnsafeMutablePointer(mutating: audioBufferList)
+        )
+        guard !bufferList.isEmpty else { return }
+
+        if bufferList.count == 1,
+           Int(bufferList[0].mNumberChannels) == channelCount,
+           let data = bufferList[0].mData {
+            let sampleCount = Int(bufferList[0].mDataByteSize)
+                / MemoryLayout<Float>.stride
+            let samples = UnsafePointer(data.assumingMemoryBound(to: Float.self))
+            ringBuffer.write(samples, count: sampleCount)
+            spectrumAnalyzer?.submitInterleaved(samples, count: sampleCount)
+            return
+        }
+
+        var availableChannels = 0
+        var frameCount = Int.max
+        for buffer in bufferList {
+            guard buffer.mData != nil else { continue }
+            let channels = max(1, Int(buffer.mNumberChannels))
+            let samples = Int(buffer.mDataByteSize) / MemoryLayout<Float>.stride
+            availableChannels += channels
+            frameCount = min(frameCount, samples / channels)
+        }
+
+        guard frameCount > 0,
+              frameCount != Int.max,
+              availableChannels >= channelCount
+        else { return }
+        let sampleCount = frameCount * channelCount
+        guard sampleCount <= scratchCapacity else { return }
+
+        for frame in 0..<frameCount {
+            var destinationChannel = 0
+            for buffer in bufferList {
+                guard let data = buffer.mData else { continue }
+                let channels = max(1, Int(buffer.mNumberChannels))
+                let samples = data.assumingMemoryBound(to: Float.self)
+                for sourceChannel in 0..<channels {
+                    guard destinationChannel < channelCount else { break }
+                    scratch[frame * channelCount + destinationChannel] =
+                        samples[frame * channels + sourceChannel]
+                    destinationChannel += 1
+                }
+                if destinationChannel == channelCount { break }
+            }
+        }
+
+        ringBuffer.write(scratch, count: sampleCount)
+        spectrumAnalyzer?.submitInterleaved(scratch, count: sampleCount)
+    }
+}
+
 // MARK: - AudioEngine
 
 /// System-wide EQ engine using Core Audio Process Taps (macOS 14.2+).
@@ -170,6 +254,7 @@ final class AudioEngine: ObservableObject {
     private var stereoProcessor: StereoProcessor?
     private var biquadProcessor: BiquadProcessor?
     private var renderContext: AudioRenderContext?
+    private var tapInputContext: TapInputContext?
     private var tapUUID = UUID()
     nonisolated(unsafe) private var deviceChangeListener: AudioObjectPropertyListenerBlock?
     nonisolated(unsafe) private var outputFormatListener: AudioObjectPropertyListenerBlock?
@@ -180,6 +265,7 @@ final class AudioEngine: ObservableObject {
     private var restartGeneration: UInt64 = 0
     private var spectrumMonitoringEnabled = false
     private var activePreset: EQPreset = .flat()
+    private var activeOutputDeviceID = AudioDeviceID(kAudioObjectUnknown)
     private let renderScratchFrameCapacity = 16_384
     private var sampleRate: Double = 48_000
     private var activeChannelCount = 2
@@ -194,7 +280,7 @@ final class AudioEngine: ObservableObject {
             latencyMode = storedMode
         }
         do {
-            let id = try getDefaultOutputDeviceID()
+            let id = try getRoutableOutputDeviceID()
             refreshOutputDeviceInfo(id, notify: false)
             installOutputFormatListener(for: id)
         } catch {
@@ -310,7 +396,8 @@ final class AudioEngine: ObservableObject {
         guard !isRunning else { return }
         errorMessage = nil
 
-        let outputDeviceID = try getDefaultOutputDeviceID()
+        let outputDeviceID = try getRoutableOutputDeviceID()
+        activeOutputDeviceID = outputDeviceID
         let outputUID = try getDeviceUID(outputDeviceID)
         refreshOutputDeviceInfo(outputDeviceID, notify: true)
         installOutputFormatListener(for: outputDeviceID)
@@ -336,12 +423,19 @@ final class AudioEngine: ObservableObject {
             "Failed to identify EQ for Mac's audio process"
         )
 
-        // Create muted global stereo tap.
+        // Tap only the selected output device. A global tap would also mute
+        // source apps routed into BlackHole before Downmix can render them.
         tapUUID = UUID()
         let exclude: [AudioObjectID] = myProcessObjectID != kAudioObjectUnknown
             ? [myProcessObjectID] : []
-        let tapDesc = CATapDescription(stereoGlobalTapButExcludeProcesses: exclude)
+        let tapDesc = CATapDescription(
+            excludingProcesses: exclude,
+            deviceUID: outputUID,
+            stream: 0
+        )
         tapDesc.uuid = tapUUID
+        tapDesc.isMixdown = true
+        tapDesc.isMono = false
         tapDesc.muteBehavior = .muted
         tapDesc.name = "EQForMac-Tap"
 
@@ -361,8 +455,18 @@ final class AudioEngine: ObservableObject {
             "Failed to get tap format"
         )
         let channels = tapFormat.mChannelsPerFrame
-        guard channels > 0 else {
-            throw AudioError.message("Tap reported no audio channels")
+        guard channels == 2 else {
+            throw AudioError.message(
+                "The output tap did not provide the requested stereo mixdown"
+            )
+        }
+        guard tapFormat.mFormatID == kAudioFormatLinearPCM,
+              tapFormat.mFormatFlags & kAudioFormatFlagIsFloat != 0,
+              tapFormat.mBitsPerChannel == 32
+        else {
+            throw AudioError.message(
+                "The output tap uses an unsupported audio format; Float32 PCM is required"
+            )
         }
 
         // Prefer device native sample rate
@@ -393,18 +497,16 @@ final class AudioEngine: ObservableObject {
             outputDeviceName, rate, channels
         )
 
-        // Aggregate device: hardware output + tap (tap list must be present at create time).
+        // The aggregate only transports the tap. Physical playback belongs to
+        // AVAudioEngine below, so adding the hardware as a subdevice would open
+        // the same DAC twice and can fail with nonmixable devices.
         let aggregateUID = UUID().uuidString
         let aggregateDesc: [String: Any] = [
             kAudioAggregateDeviceNameKey: "EQForMac-Aggregate",
             kAudioAggregateDeviceUIDKey: aggregateUID,
-            kAudioAggregateDeviceMainSubDeviceKey: outputUID,
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceIsStackedKey: false,
             kAudioAggregateDeviceTapAutoStartKey: true,
-            kAudioAggregateDeviceSubDeviceListKey: [
-                [kAudioSubDeviceUIDKey: outputUID]
-            ],
             kAudioAggregateDeviceTapListKey: [
                 [
                     kAudioSubTapDriftCompensationKey: true,
@@ -438,13 +540,16 @@ final class AudioEngine: ObservableObject {
         // Route engine output to the real hardware device.
         var outputID = outputDeviceID
         let outputAU = avEngine.outputNode.audioUnit!
-        AudioUnitSetProperty(
-            outputAU,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &outputID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
+        try caCheck(
+            AudioUnitSetProperty(
+                outputAU,
+                kAudioOutputUnitProperty_CurrentDevice,
+                kAudioUnitScope_Global,
+                0,
+                &outputID,
+                UInt32(MemoryLayout<AudioDeviceID>.size)
+            ),
+            "Failed to route processed audio to the output device"
         )
 
         guard let format = AVAudioFormat(
@@ -528,19 +633,17 @@ final class AudioEngine: ObservableObject {
         try avEngine.start()
         engine = avEngine
 
-        // IOProc: write tap audio into ring buffer; silence aggregate output
-        // (playback is done by AVAudioEngine on the real device).
+        // IOProc: normalize the tap's buffer layout into the ring buffer and
+        // silence aggregate output (AVAudioEngine owns physical playback).
+        let tapInput = TapInputContext(
+            ringBuffer: ring,
+            spectrumAnalyzer: analyzer,
+            channelCount: Int(channels),
+            scratchFrameCapacity: renderScratchFrameCapacity
+        )
+        tapInputContext = tapInput
         let ioBlock: AudioDeviceIOBlock = { _, inInputData, _, outOutputData, _ in
-            let inList = UnsafeMutableAudioBufferListPointer(
-                UnsafeMutablePointer(mutating: inInputData)
-            )
-            for i in 0..<inList.count {
-                guard let data = inList[i].mData else { continue }
-                let sampleCount = Int(inList[i].mDataByteSize) / MemoryLayout<Float>.size
-                let samples = data.assumingMemoryBound(to: Float.self)
-                ring.write(samples, count: sampleCount)
-                analyzer?.submitInterleaved(samples, count: sampleCount)
-            }
+            tapInput.consume(inInputData)
 
             let outList = UnsafeMutableAudioBufferListPointer(outOutputData)
             for i in 0..<outList.count {
@@ -588,6 +691,7 @@ final class AudioEngine: ObservableObject {
         latencyTimer?.invalidate()
         latencyTimer = nil
         measuredLatencyMilliseconds = 0
+        activeOutputDeviceID = AudioDeviceID(kAudioObjectUnknown)
 
         if let procID {
             AudioDeviceStop(aggregateDeviceID, procID)
@@ -611,6 +715,7 @@ final class AudioEngine: ObservableObject {
         limiterNode = nil
         sourceNode = nil
         renderContext = nil
+        tapInputContext = nil
 
         if aggregateDeviceID != kAudioObjectUnknown {
             AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
@@ -682,8 +787,16 @@ final class AudioEngine: ObservableObject {
             repeats: true
         ) { [weak self] _ in
             Task { @MainActor in
-                guard let self,
-                      let ringBuffer = self.ringBuffer,
+                guard let self else { return }
+                guard isAudioDeviceAlive(self.activeOutputDeviceID) else {
+                    let name = self.outputDeviceName
+                    self.stop()
+                    self.errorMessage =
+                        "\(name) disconnected. Reconnect it, then toggle EQ off and on."
+                    self.onStateChange?()
+                    return
+                }
+                guard let ringBuffer = self.ringBuffer,
                       self.sampleRate > 0
                 else { return }
                 let queuedFrames =
@@ -799,7 +912,7 @@ final class AudioEngine: ObservableObject {
 
     private func handleDefaultDeviceChange() {
         do {
-            let id = try getDefaultOutputDeviceID()
+            let id = try getRoutableOutputDeviceID()
             refreshOutputDeviceInfo(id, notify: true)
             installOutputFormatListener(for: id)
         } catch {

@@ -1,6 +1,6 @@
 # EQ for Mac
 
-A **menu-bar** system-wide equalizer for macOS. Once EQ is on, it shapes **all** audio leaving your Mac — browser, Spotify, Apple Music, YouTube Music, video players, games, notifications — everything.
+A **menu-bar** system-wide equalizer for macOS. Once EQ is on, it shapes audio sent to the active output — browser, Spotify, Apple Music, YouTube Music, video players, games, notifications — everything using that route.
 
 No virtual audio driver required. Uses **Core Audio Taps** (macOS 14.2+).
 
@@ -43,6 +43,7 @@ Thank you to [Sharur](https://www.youtube.com/@Sharur) and [PEQdB](https://peqdb
 | **Clip-safe auto-preamp** | Computes the combined filter response and reserves headroom automatically or on demand |
 | **Instant A/B** | Toggle bypass, or hold A/B to hear dry audio and release to resume processing |
 | **Per-output profiles** | Remember a full EQ snapshot for an output device and restore it when that device becomes active |
+| **Downmix compatibility** | Device-scoped capture preserves BlackHole’s multichannel feed and applies EQ after Downmix’s stereo render |
 | **Headphone crossfeed** | Optional, focused spatial processing without duplicating macOS accessibility controls |
 | **Menu-bar power tools** | Global ⌥⌘E toggle, option-click quick controls, scroll-to-adjust preamp, and Settings |
 | **Guided permission setup** | Explains the macOS system-audio permission, opens the correct pane, and confirms it with a real engine probe |
@@ -228,7 +229,7 @@ Filter 2: ON PK Fc 169 Hz Gain -2.1 dB Q 0.77
 ## Architecture (short)
 
 ```text
-App audio ──► (muted) CATap ──► Aggregate device IOProc
+Output-device audio ──► (muted, device-scoped) CATap ──► Aggregate IOProc
                                       │
                        ┌──────────────┴──────────────┐
                        ▼                             ▼
@@ -250,7 +251,9 @@ App audio ──► (muted) CATap ──► Aggregate device IOProc
                   Output device
 ```
 
-The tap mutes the direct path to the speakers so you only hear the processed stream. The EQ process is excluded from the tap so the engine does not silence itself.
+The tap mutes the direct path to the selected output so you only hear the processed stream. The EQ process is excluded from the tap so the engine does not silence itself.
+
+When **Downmix** uses BlackHole as the macOS default output, EQ for Mac resolves Downmix’s saved physical output and taps that device instead. This keeps the 16-channel BlackHole feed intact and places EQ after Downmix. Select a valid physical output in Downmix, then toggle EQ off and on after changing that route.
 
 ---
 
@@ -378,8 +381,8 @@ repository.
 - Launch at login uses `SMAppService` and must be exercised from the installed
   application bundle. macOS can require approval under **General → Login Items**;
   raw `swift run` executables cannot register.
-- EQ is currently system-wide. Independent per-app taps/profiles remain an
-  advanced future engine mode.
+- EQ applies to audio sent to the resolved output device. Independent per-app
+  taps/profiles remain an advanced future engine mode.
 - The initial install requires System Audio Recording permission. macOS may ask
   again after a materially changed rebuild, but not on ordinary launches.
 

@@ -375,6 +375,28 @@ struct RenderDSPTests {
     }
 
     @Test
+    func tapInputInterleavesNonInterleavedCoreAudioBuffers() {
+        let ring = AudioRingBuffer(capacityFrames: 8, channels: 2)
+        let context = TapInputContext(
+            ringBuffer: ring,
+            spectrumAnalyzer: nil,
+            channelCount: 2,
+            scratchFrameCapacity: 8
+        )
+
+        _ = process(left: [1, 2], right: [10, 20]) {
+            context.consume(UnsafePointer($0.unsafeMutablePointer))
+        }
+
+        var samples = Array(repeating: Float(0), count: 4)
+        let samplesRead = samples.withUnsafeMutableBufferPointer {
+            ring.read($0.baseAddress!, count: $0.count)
+        }
+        #expect(samplesRead == 4)
+        #expect(samples == [1, 10, 2, 20])
+    }
+
+    @Test
     func renderContextWaitsForItsLatencyTarget() {
         let ring = AudioRingBuffer(
             capacityFrames: 16,
