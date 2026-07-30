@@ -6,8 +6,10 @@ cd "$ROOT"
 
 APP_NAME="EQ for Mac"
 EXECUTABLE_NAME="EQForMac"
-VERSION="${VERSION:-1.0.0}"
-BUILD_NUMBER="${BUILD_NUMBER:-1}"
+SOURCE_PLIST="$ROOT/Sources/EQForMac/Info.plist"
+# Info.plist is the single source of truth for the version; bump it there.
+VERSION="${VERSION:-$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$SOURCE_PLIST")}"
+BUILD_NUMBER="${BUILD_NUMBER:-$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$SOURCE_PLIST")}"
 CONFIGURATION="${CONFIGURATION:-release}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/dist}"
 ARCHS="${ARCHS:-}"
